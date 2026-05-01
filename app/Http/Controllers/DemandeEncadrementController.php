@@ -55,8 +55,8 @@ class DemandeEncadrementController extends Controller
         $request->validate([
             'sujet'        => 'required|string|max:255',
             'description'  => 'required|string',
-            'encadrant_id' => 'required|integer|exists:utilisateurs,id',
-            'doc_pdf'      => 'sometimes|nullable|file|mimes:pdf,doc,docx|max:5120',
+            'encadrant_id' => 'required|exists:utilisateurs,id',
+            'doc_pdf'      => 'nullable|file|mimes:pdf,doc,docx|max:5120',
         ]);
 
         $etudiant = $request->user();
@@ -116,8 +116,8 @@ class DemandeEncadrementController extends Controller
         $request->validate([
             'sujet'        => 'sometimes|string|max:255',
             'description'  => 'sometimes|string',
-            'encadrant_id' => 'sometimes|integer|exists:utilisateurs,id',
-            'doc_pdf'      => 'sometimes|nullable|file|mimes:pdf,doc,docx|max:5120',
+            'encadrant_id' => 'sometimes|exists:utilisateurs,id',
+            'doc_pdf'      => 'nullable|file|mimes:pdf,doc,docx|max:5120',
         ]);
 
         // Upload nouveau fichier si fourni
@@ -125,7 +125,45 @@ class DemandeEncadrementController extends Controller
             $demande->doc_pdf = $request->file('doc_pdf')->store('demandes', 'public');
         }
 
-        $demande->fill($request->only(['sujet', 'description', 'encadrant_id']));
+        if ($request->filled('sujet'))        $demande->sujet        = $request->sujet;
+        if ($request->filled('description'))  $demande->description  = $request->description;
+        if ($request->filled('encadrant_id')) $demande->encadrant_id = (int)$request->encadrant_id;
+        $demande->save();
+
+        return response()->json([
+            'message' => 'Demande mise à jour.',
+            'demande' => $this->format($demande->load(['encadrant', 'etudiant.specialite'])),
+        ]);
+    }
+
+    // ── POST /api/demandes-encadrement/{id}/modifier ─────────────
+    // Dedicated multipart-safe update endpoint — avoids PUT/POST confusion
+    public function modifier(Request $request, string $id)
+    {
+        $demande = DemandeEncadrement::findOrFail($id);
+
+        if ((int)$demande->etudiant_id !== (int)$request->user()->id) {
+            return response()->json(['message' => 'Non autorisé.'], 403);
+        }
+        if ($demande->statut !== 'en_attente') {
+            return response()->json(['message' => 'Cette demande ne peut plus être modifiée.'], 422);
+        }
+
+        $request->validate([
+            'sujet'        => 'sometimes|string|max:255',
+            'description'  => 'sometimes|string',
+            'encadrant_id' => 'sometimes|integer|exists:utilisateurs,id',
+            'doc_pdf'      => 'sometimes|nullable|file|mimes:pdf|max:10240',
+        ]);
+
+        if ($request->filled('sujet'))        $demande->sujet        = $request->sujet;
+        if ($request->filled('description'))  $demande->description  = $request->description;
+        if ($request->filled('encadrant_id')) $demande->encadrant_id = (int)$request->encadrant_id;
+
+        if ($request->hasFile('doc_pdf')) {
+            $demande->doc_pdf = $request->file('doc_pdf')->store('demandes', 'public');
+        }
+
         $demande->save();
 
         return response()->json([

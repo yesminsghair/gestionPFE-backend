@@ -13,12 +13,12 @@ use App\Http\Controllers\DemandeEncadrementController;
 use App\Http\Controllers\AffectationController;
 use App\Http\Controllers\PhaseController;
 use App\Http\Controllers\GrilleEvaluationController;
-use App\Http\Controllers\JuryController;
-use App\Http\Controllers\SoutenanceController;
 use App\Http\Controllers\LivrableController;
 use App\Http\Controllers\ReunionController;
 use App\Http\Controllers\SuiviController;
 use App\Http\Controllers\NotificationController;
+use App\Http\Controllers\JuryPfeController;
+use App\Http\Controllers\MessageController;
 
 // ─────────────────────────────────────────────
 // PUBLIC ROUTES
@@ -79,12 +79,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/demandes-encadrement/{id}',          [DemandeEncadrementController::class, 'destroy']);
     Route::post  ('/demandes-encadrement/{id}/accepter', [DemandeEncadrementController::class, 'accepter']);
     Route::post  ('/demandes-encadrement/{id}/rejeter',  [DemandeEncadrementController::class, 'rejeter']);
+    Route::post  ('/demandes-encadrement/{id}/modifier', [DemandeEncadrementController::class, 'modifier']);
 
     // ── AFFECTATIONS ────────────────────────────────────────────────
     Route::prefix('affectations')->group(function () {
         Route::get('/',                           [AffectationController::class, 'index']);
         Route::get('/mode',                       [AffectationController::class, 'getMode']);
         Route::get('/mon-affectation',            [AffectationController::class, 'monAffectation']);
+        Route::put('/mon-affectation/sujet',      [AffectationController::class, 'saveSujet']);
         Route::get('/encadrants-disponibles',     [AffectationController::class, 'encadrantsDisponibles']);
         Route::get('/mes-affectations',           [AffectationController::class, 'mesAffectations']);
         Route::get('/etudiants-de-ma-specialite', [AffectationController::class, 'etudiantsDeMaSpecialite']);
@@ -108,8 +110,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/{phase}',    [PhaseController::class, 'update']);
         Route::delete('/{phase}', [PhaseController::class, 'destroy']);
     });
-    // NOTE: /suivi/lancer has been removed — activation is now via
-    // PUT /phases/{phase} { active: true } by the chef.
 
     // ── GRILLES D'EVALUATION ────────────────────────────────────────
     Route::prefix('grilles')->group(function () {
@@ -118,61 +118,20 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/{grille}',                                  [GrilleEvaluationController::class, 'show']);
         Route::put('/{grille}',                                  [GrilleEvaluationController::class, 'update']);
         Route::delete('/{grille}',                               [GrilleEvaluationController::class, 'destroy']);
-        // Chef submits to directeur for validation
         Route::post('/{grille}/publier',                         [GrilleEvaluationController::class, 'publier']);
-        // Both chef (direct lock) AND directeur (validation lock) use this
         Route::post('/{grille}/verrouiller',                     [GrilleEvaluationController::class, 'verrouiller']);
-        // Categories
+        Route::post('/{grille}/fermer',                          [GrilleEvaluationController::class, 'fermer']);
         Route::post('/{grille}/categories',                      [GrilleEvaluationController::class, 'addCategorie']);
         Route::put('/{grille}/categories/{categorie}',           [GrilleEvaluationController::class, 'updateCategorie']);
         Route::delete('/{grille}/categories/{categorie}',        [GrilleEvaluationController::class, 'deleteCategorie']);
-        // Criteres within a category
         Route::post('/{grille}/categories/{categorie}/criteres', [GrilleEvaluationController::class, 'addCritere']);
     });
-    // Standalone critere routes
     Route::put('/criteres/{critere}',    [GrilleEvaluationController::class, 'updateCritere']);
     Route::delete('/criteres/{critere}', [GrilleEvaluationController::class, 'deleteCritere']);
 
-    // ── JURY ────────────────────────────────────────────────────────
-    Route::get('/notes-jury',                [JuryController::class, 'getAllNotes']);
-    Route::get('/resultats',                 [JuryController::class, 'allResultats']);
-    Route::post('/deliberation/declencher',  [JuryController::class, 'declencherDeliberation']);
-    Route::post('/deliberation/publier',     [JuryController::class, 'publierTousResultats']);
-    Route::get('/deliberation/mon-resultat', [JuryController::class, 'monResultat']);
-
-    Route::prefix('jurys')->group(function () {
-        Route::get('/',                           [JuryController::class, 'index']);
-        Route::post('/',                          [JuryController::class, 'store']);
-        Route::get('/{jury}',                     [JuryController::class, 'show']);
-        Route::delete('/{jury}',                  [JuryController::class, 'destroy']);
-        Route::post('/{jury}/membres',            [JuryController::class, 'addMembre']);
-        Route::put('/{jury}/membres/{membre}',    [JuryController::class, 'updateMembre']);
-        Route::delete('/{jury}/membres/{membre}', [JuryController::class, 'removeMembre']);
-        Route::get('/{jury}/notes',               [JuryController::class, 'getNotes']);
-        Route::post('/{jury}/notes',              [JuryController::class, 'saveNote']);
-        Route::post('/{jury}/deliberer',          [JuryController::class, 'deliberer']);
-        Route::post('/{jury}/publier-resultats',  [JuryController::class, 'publierResultats']);
-    });
-
-    // ── SOUTENANCES ─────────────────────────────────────────────────
-    Route::prefix('soutenances')->group(function () {
-        Route::get('/projets-disponibles',    [SoutenanceController::class, 'projetsDisponibles']);
-        Route::get('/plans-proposes',         [SoutenanceController::class, 'plansProposes']);
-        Route::post('/publier-calendrier',    [SoutenanceController::class, 'publierCalendrier']);
-        Route::put('/plans/{plan}/valider',   [SoutenanceController::class, 'validerPlan']);
-        Route::put('/plans/{plan}/rejeter',   [SoutenanceController::class, 'rejeterPlan']);
-        Route::get('/',                       [SoutenanceController::class, 'index']);
-        Route::post('/',                      [SoutenanceController::class, 'store']);
-        Route::get('/{seance}',               [SoutenanceController::class, 'show']);
-        Route::put('/{seance}',               [SoutenanceController::class, 'update']);
-        Route::delete('/{seance}',            [SoutenanceController::class, 'destroy']);
-        Route::post('/{seance}/terminer',     [SoutenanceController::class, 'terminer']);
-        Route::post('/{seance}/annuler',      [SoutenanceController::class, 'annuler']);
-        Route::put('/{seance}/affecter',      [SoutenanceController::class, 'affecterProjet']);
-    });
-
     // ── LIVRABLES ───────────────────────────────────────────────────
     Route::prefix('livrables')->group(function () {
+        Route::get('/encadrant',              [LivrableController::class, 'parEncadrant']);
         Route::get('/phase/{phase}',          [LivrableController::class, 'byPhase']);
         Route::get('/',                       [LivrableController::class, 'index']);
         Route::post('/',                      [LivrableController::class, 'store']);
@@ -180,7 +139,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/{livrable}/valider',     [LivrableController::class, 'valider']);
         Route::put('/{livrable}/rejeter',     [LivrableController::class, 'rejeter']);
         Route::put('/{livrable}/verrouiller', [LivrableController::class, 'verrouiller']);
-        Route::get('/livrables/{livrable}/download',   [LivrableController::class, 'download']);
         Route::delete('/{livrable}',          [LivrableController::class, 'destroy']);
     });
 
@@ -197,14 +155,42 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── SUIVI ───────────────────────────────────────────────────────
-    // /suivi/lancer REMOVED — activation handled by PUT /phases/{phase}
     Route::prefix('suivi')->group(function () {
-        Route::get('/encadrant',                        [SuiviController::class, 'parEncadrant']);
-        Route::get('/etudiant',                         [SuiviController::class, 'parEtudiant']);
-        Route::post('/valider',                         [SuiviController::class, 'validerPhase']);
-        Route::post('/rejeter',                         [SuiviController::class, 'rejeterPhase']);
-        Route::get('/historique/{affectationId}',       [SuiviController::class, 'historique']);
+        Route::get('/encadrant',                  [SuiviController::class, 'parEncadrant']);
+        Route::get('/etudiant',                   [SuiviController::class, 'parEtudiant']);
+        Route::post('/valider',                   [SuiviController::class, 'validerPhase']);
+        Route::post('/rejeter',                   [SuiviController::class, 'rejeterPhase']);
+        Route::get('/historique/{affectationId}', [SuiviController::class, 'historique']);
     });
+
+    // ── JURY PFE / SOUTENANCE / RÉSULTATS ──────────────────────────
+    // Explicit model binding: {membre} → JuryMembrePfe
+    Route::model('membre', \App\Models\JuryMembrePfe::class);
+
+    Route::prefix('jurys-pfe')->group(function () {
+        // ⚠ Static routes MUST come before /{juryPfe} to avoid collision
+        Route::get('/projets-disponibles', [JuryPfeController::class, 'projetsDisponibles']);
+        Route::get('/etudiants-du-chef',   [JuryPfeController::class, 'etudiantsDuChef']);
+        Route::post('/publier-calendrier', [JuryPfeController::class, 'publierCalendrier']);
+
+        Route::get('/',         [JuryPfeController::class, 'index']);
+        Route::post('/',        [JuryPfeController::class, 'store']);
+        Route::get('/{juryPfe}',    [JuryPfeController::class, 'show']);
+        Route::put('/{juryPfe}',    [JuryPfeController::class, 'update']);
+        Route::delete('/{juryPfe}', [JuryPfeController::class, 'destroy']);
+
+        Route::post('/{juryPfe}/membres',            [JuryPfeController::class, 'addMembre']);
+        Route::put('/{juryPfe}/membres/{membre}',    [JuryPfeController::class, 'updateMembre']);
+        Route::delete('/{juryPfe}/membres/{membre}', [JuryPfeController::class, 'removeMembre']);
+
+        Route::get('/{juryPfe}/notes',      [JuryPfeController::class, 'getNotes']);
+        Route::post('/{juryPfe}/notes',     [JuryPfeController::class, 'saveNote']);
+        Route::post('/{juryPfe}/deliberer', [JuryPfeController::class, 'deliberer']);
+        Route::post('/{juryPfe}/publier',   [JuryPfeController::class, 'publier']);
+    });
+
+    Route::get('/resultats-pfe',                 [JuryPfeController::class, 'allResultats']);
+    Route::get('/deliberation-pfe/mon-resultat', [JuryPfeController::class, 'monResultat']);
 
     // ── NOTIFICATIONS ────────────────────────────────────────────────
     Route::prefix('notifications')->group(function () {
@@ -213,5 +199,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/',                    [NotificationController::class, 'index']);
         Route::put('/{notification}/lire', [NotificationController::class, 'markAsRead']);
         Route::delete('/{notification}',   [NotificationController::class, 'destroy']);
+    });
+
+    // ── MESSAGERIE ───────────────────────────────────────────────────
+    Route::prefix('conversations')->group(function () {
+        Route::get('/',                         [MessageController::class, 'conversations']);
+        Route::post('/',                        [MessageController::class, 'createConversation']);
+        Route::get('/{conversation}/messages',  [MessageController::class, 'messages']);
+        Route::post('/{conversation}/messages', [MessageController::class, 'sendMessage']);
+        Route::put('/{conversation}/lire',      [MessageController::class, 'markConversationRead']);
     });
 });

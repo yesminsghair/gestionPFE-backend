@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Controller;
 use App\Models\Notification;
 use App\Models\Reunion;
+use App\Models\Utilisateur;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -12,7 +13,6 @@ use Illuminate\Support\Facades\Auth;
 class ReunionController extends Controller
 {
     // GET /api/reunions
-    // L'encadrant voit toutes ses réunions ; l'étudiant voit les siennes
     public function index(Request $request): JsonResponse
     {
         $user  = Auth::user();
@@ -24,7 +24,6 @@ class ReunionController extends Controller
             $query->where('etudiant_id', $user->id);
         }
 
-        // Filtres optionnels transmis par le front
         if ($request->has('statut')) {
             $query->where('statut', $request->statut);
         }
@@ -62,11 +61,15 @@ class ReunionController extends Controller
 
         $reunion = Reunion::create($data);
 
-        // Notifier l'étudiant
-        $dateFormatee = \Carbon\Carbon::parse($data['date_reunion'])->format('d/m/Y à H:i');
+        // Notify the student about the new meeting proposal
+        $encadrant     = Utilisateur::find(Auth::id());
+        $encadrantNom  = trim(($encadrant->prenom ?? '') . ' ' . ($encadrant->nom ?? ''));
+        $dateFormatee  = \Carbon\Carbon::parse($data['date_reunion'])->format('d/m/Y à H\hi');
+
         Notification::create([
             'user_id'    => $data['etudiant_id'],
-            'message'    => "Une réunion ({$data['type']}) a été planifiée pour le {$dateFormatee}.",
+            'message'    => "Votre encadrant {$encadrantNom} vous propose une réunion ({$data['type']}) le {$dateFormatee}. Veuillez confirmer ou décliner.",
+            'lu'         => false,
             'created_at' => now(),
         ]);
 
@@ -108,17 +111,22 @@ class ReunionController extends Controller
     {
         $reunion->update(['statut' => 'confirmee']);
 
+        $etudiant    = Utilisateur::find($reunion->etudiant_id);
+        $etudiantNom = trim(($etudiant->prenom ?? '') . ' ' . ($etudiant->nom ?? ''));
+        $dateFormatee = \Carbon\Carbon::parse($reunion->date_reunion)->format('d/m/Y à H\hi');
+
+        // Notify encadrant that the student confirmed
         Notification::create([
             'user_id'    => $reunion->encadrant_id,
-            'message'    => "L'étudiant a confirmé la réunion du " .
-                \Carbon\Carbon::parse($reunion->date_reunion)->format('d/m/Y à H:i') . '.',
+            'message'    => "{$etudiantNom} a confirmé la réunion du {$dateFormatee}.",
+            'lu'         => false,
             'created_at' => now(),
         ]);
 
         return response()->json($reunion);
     }
 
-    // POST /api/reunions/{reunion}/annuler
+    // POST /api/reunions/{reunion}/annuler — étudiant décline
     public function annuler(Request $request, Reunion $reunion): JsonResponse
     {
         $data = $request->validate([
@@ -126,6 +134,19 @@ class ReunionController extends Controller
         ]);
 
         $reunion->update(['statut' => 'annulee', 'motif' => $data['motif'] ?? null]);
+
+        // Notify encadrant that the student declined, with reason
+        $etudiant    = Utilisateur::find($reunion->etudiant_id);
+        $etudiantNom = trim(($etudiant->prenom ?? '') . ' ' . ($etudiant->nom ?? ''));
+        $dateFormatee = \Carbon\Carbon::parse($reunion->date_reunion)->format('d/m/Y à H\hi');
+        $motifMsg    = $data['motif'] ? " Motif : {$data['motif']}" : '';
+
+        Notification::create([
+            'user_id'    => $reunion->encadrant_id,
+            'message'    => "{$etudiantNom} a décliné la réunion du {$dateFormatee}.{$motifMsg}",
+            'lu'         => false,
+            'created_at' => now(),
+        ]);
 
         return response()->json($reunion);
     }
@@ -144,7 +165,8 @@ class ReunionController extends Controller
 
         Notification::create([
             'user_id'    => $reunion->etudiant_id,
-            'message'    => 'Le compte-rendu de votre réunion a été rédigé.',
+            'message'    => 'Le compte-rendu de votre réunion a été rédigé par votre encadrant.',
+            'lu'         => false,
             'created_at' => now(),
         ]);
 

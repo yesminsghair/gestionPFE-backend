@@ -12,6 +12,7 @@ class Livrable extends Model
         'phase_id',
         'etudiant_id',
         'fichier',
+        'file_name',
         'statut',
         'commentaire',
         'verrouille',

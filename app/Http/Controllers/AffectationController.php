@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Cache;
 use App\Models\Affectation;
+use App\Models\Notification;
 use App\Models\Utilisateur;
 
 class AffectationController extends Controller
@@ -29,13 +30,11 @@ class AffectationController extends Controller
     }
 
     // ── GET /api/affectations/mode ───────────────────────────────────────────
-    // Used by the student dashboard to know if accord-mutuel is active.
     public function getMode(Request $request)
     {
         $user = $request->user();
 
         if ($user->role === 'etudiant') {
-            // Find the chef of this student's speciality
             $chef = Utilisateur::where('role', 'chef')
                 ->where('specialite_id', $user->specialite_id)
                 ->first();
@@ -44,31 +43,55 @@ class AffectationController extends Controller
                 return response()->json(['mode' => null]);
             }
 
+            // 1. Try cache first (fast)
             $mode = Cache::get($this->cacheKey($chef->id));
+
+            // 2. DB fallback: read from any affectation row created by this chef
+            if (!$mode) {
+                $mode = Affectation::where('chef_id', $chef->id)
+                    ->whereNotNull('mode')
+                    ->orderBy('updated_at', 'desc')
+                    ->value('mode');
+            }
+
+            // 3. If found in DB but not in cache, repopulate cache
+            if ($mode) {
+                Cache::put($this->cacheKey($chef->id), $mode, now()->addYear());
+            }
+
             return response()->json(['mode' => $mode]);
         }
 
-        // Chef reads their own saved mode
+        // Chef reading their own mode
         $mode = Cache::get($this->cacheKey($user->id));
+
+        if (!$mode) {
+            $mode = Affectation::where('chef_id', $user->id)
+                ->whereNotNull('mode')
+                ->orderBy('updated_at', 'desc')
+                ->value('mode');
+
+            if ($mode) {
+                Cache::put($this->cacheKey($user->id), $mode, now()->addYear());
+            }
+        }
+
         return response()->json(['mode' => $mode]);
     }
 
     // ── POST /api/affectations/save-mode ─────────────────────────────────────
-    // Called when chef confirms mode at step 1 — persists immediately.
     public function saveMode(Request $request)
     {
         $request->validate(['mode' => 'required|in:manuel,aleatoire,semi']);
 
         $chefId = $request->user()->id;
 
-        // Store for 1 year — effectively permanent until reset
         Cache::put($this->cacheKey($chefId), $request->mode, now()->addYear());
 
         return response()->json(['message' => 'Mode enregistré', 'mode' => $request->mode]);
     }
 
     // ── GET /api/affectations/mon-affectation ────────────────────────────────
-    // Returns the student's own diffused affectation, or null.
     public function monAffectation(Request $request)
     {
         $user = $request->user();
@@ -83,6 +106,20 @@ class AffectationController extends Controller
             ->first();
 
         return response()->json($aff ? $this->format($aff) : null);
+    }
+
+    // ── GET /api/affectations/mes-affectations ───────────────────────────────
+    // Used by the encadrant dashboard to list their assigned students
+    public function mesAffectations(Request $request)
+    {
+        $user = $request->user();
+
+        $affs = Affectation::with(['etudiant.specialite'])
+            ->where('encadrant_id', $user->id)
+            ->where('statut', 'diffusee')
+            ->get();
+
+        return response()->json($affs->map(fn($a) => $this->format($a)));
     }
 
     // ── GET /api/affectations/encadrants-disponibles ─────────────────────────
@@ -164,13 +201,14 @@ class AffectationController extends Controller
     public function diffuser(Request $request)
     {
         $chefId = $request->user()->id;
+        $chef   = $request->user();
         $mode   = Cache::get($this->cacheKey($chefId));
 
         // For accord-mutuel: build rows from accepted demandes
         if ($mode === 'manuel') {
             $demandes = \App\Models\DemandeEncadrement::with(['etudiant'])
                 ->whereHas('etudiant', fn($q) =>
-                    $q->where('specialite_id', $request->user()->specialite_id)
+                    $q->where('specialite_id', $chef->specialite_id)
                 )
                 ->where('statut', 'acceptee')
                 ->get();
@@ -191,6 +229,24 @@ class AffectationController extends Controller
         Affectation::where('chef_id', $chefId)
             ->update(['statut' => 'diffusee', 'diffuse_at' => Carbon::now()]);
 
+        // Notify all encadrants who have been assigned at least one student
+        $affectationsDiffusees = Affectation::where('chef_id', $chefId)
+            ->whereNotNull('encadrant_id')
+            ->with('etudiant')
+            ->get()
+            ->groupBy('encadrant_id');
+
+        foreach ($affectationsDiffusees as $encadrantId => $affs) {
+            $nbEtudiants = $affs->count();
+            $nomChef = trim($chef->prenom . ' ' . $chef->nom);
+            Notification::create([
+                'user_id'    => $encadrantId,
+                'message'    => "Les affectations ont été diffusées par {$nomChef}. Vous encadrez désormais {$nbEtudiants} étudiant(s).",
+                'lu'         => false,
+                'created_at' => now(),
+            ]);
+        }
+
         return response()->json(['message' => 'Diffusion réussie']);
     }
 
@@ -201,7 +257,6 @@ class AffectationController extends Controller
 
         Affectation::where('chef_id', $chefId)->delete();
 
-        // Clear mode so students see locked state again
         Cache::forget($this->cacheKey($chefId));
 
         return response()->json(['message' => 'Réinitialisation OK']);

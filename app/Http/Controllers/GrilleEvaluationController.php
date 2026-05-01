@@ -45,6 +45,7 @@ class GrilleEvaluationController extends Controller
         }
 
         if ($user->role === 'encadrant') {
+            // 'ferme' grilles are closed — encadrants cannot access them
             $grilles = GrilleEvaluation::with(['categories.criteres', 'chef.specialite'])
                 ->where('statut', 'verrouille')
                 ->whereIn('visibilite', ['encadrants', 'jurys'])
@@ -55,6 +56,7 @@ class GrilleEvaluationController extends Controller
         }
 
         if ($user->role === 'jury') {
+            // 'ferme' grilles are closed — jurys cannot access them
             $grilles = GrilleEvaluation::with(['categories.criteres', 'chef.specialite'])
                 ->where('statut', 'verrouille')
                 ->where('visibilite', 'jurys')
@@ -148,30 +150,54 @@ class GrilleEvaluationController extends Controller
     /**
      * POST /api/grilles/{id}/verrouiller
      *
-     * Callers:
-     *   - Chef: locks his own grille (brouillon or publie) — publishes it immediately
+     * Two callers:
+     *   - Chef: locks his own brouillon grille (was already possible before)
      *   - Directeur: validates a submitted (publie) grille → locks it officially
      *
-     * On lock:
-     *   - If directeur validates a publie grille → notify the chef
-     *   - Always notify all encadrants + jurys of the same speciality
-     *     so they know the grille is available for evaluation
+     * When called by the directeur on a publie grille, the chef gets a
+     * "validated" notification. When called by the chef directly on a brouillon,
+     * no special notification is needed.
      */
     public function verrouiller(GrilleEvaluation $grille): JsonResponse
     {
-        $user        = Auth::user();
+        $user    = Auth::user();
         $isDirecteur = $user->role === 'directeur';
         $wasPublie   = $grille->statut === 'publie';
 
         $grille->update(['statut' => 'verrouille', 'verrouille_le' => now()]);
 
-        // 1. Notify the owning chef when the directeur validates
+        // Notify the owning chef only when the directeur validates
         if ($isDirecteur && $wasPublie) {
             $this->notifierChefValidation($grille);
         }
 
-        // 2. Always notify encadrants + jurys of the same speciality
-        $this->notifierEncadrantsEtJurys($grille);
+        return response()->json($grille->fresh());
+    }
+
+    /**
+     * POST /api/grilles/{id}/fermer
+     *
+     * Chef closes the grille at end of PFE season.
+     * Status: verrouille → ferme
+     * Effect: encadrants and jurys can no longer access this grille.
+     */
+    public function fermer(GrilleEvaluation $grille): JsonResponse
+    {
+        $user = Auth::user();
+
+        if ($user->role !== 'chef' || $grille->chef_id !== $user->id) {
+            return response()->json(['message' => 'Non autorisé.'], 403);
+        }
+
+        if ($grille->statut === 'ferme') {
+            return response()->json(['message' => 'Grille déjà fermée.'], 422);
+        }
+
+        if ($grille->statut !== 'verrouille') {
+            return response()->json(['message' => 'Seule une grille verrouillée peut être fermée.'], 422);
+        }
+
+        $grille->update(['statut' => 'ferme']);
 
         return response()->json($grille->fresh());
     }
@@ -331,37 +357,6 @@ class GrilleEvaluationController extends Controller
             ]);
         } catch (\Throwable $e) {
             Log::warning('GrilleEvaluationController::notifierChefValidation: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Notify all encadrants and jurys of the same speciality that a grille
-     * has been locked/published and is now available for evaluation.
-     */
-    private function notifierEncadrantsEtJurys(GrilleEvaluation $grille): void
-    {
-        try {
-            $chef       = Utilisateur::with('specialite')->find($grille->chef_id);
-            $specialite = optional($chef?->specialite)->nom ?? '—';
-            $specialiteId = $chef?->specialite_id;
-
-            $message = "La grille d'évaluation PFE ({$specialite}) est maintenant disponible. "
-                     . "Vous pouvez l'utiliser pour évaluer vos étudiants.";
-
-            // Find all encadrants and jurys in the same speciality
-            $destinataires = Utilisateur::whereIn('role', ['encadrant', 'jury'])
-                ->when($specialiteId, fn($q) => $q->where('specialite_id', $specialiteId))
-                ->pluck('id');
-
-            foreach ($destinataires as $userId) {
-                Notification::create([
-                    'user_id'    => $userId,
-                    'message'    => $message,
-                    'created_at' => now(),
-                ]);
-            }
-        } catch (\Throwable $e) {
-            Log::warning('GrilleEvaluationController::notifierEncadrantsEtJurys: ' . $e->getMessage());
         }
     }
 }
