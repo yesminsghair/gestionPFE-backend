@@ -9,8 +9,14 @@ class Specialite extends Model
     protected $table = 'specialites';
 
     protected $fillable = [
-        'nom', 'code', 'description', 'date_creation'
+        'nom', 
+        'code', 
+        'description', 
+        'date_creation'  // ✅ AJOUTER ce champ
     ];
+
+    // Désactiver les timestamps si votre table n'a pas created_at/updated_at
+    public $timestamps = false;
 
     public function utilisateurs()
     {

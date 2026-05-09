@@ -115,32 +115,37 @@ class AuthController extends Controller
     public function inscription(Request $request)
     {
         $request->validate([
-            'nom'       => 'required|string|max:100',
-            'prenom'    => 'required|string|max:100',
-            'email'     => 'required|email|unique:utilisateurs,email',
-            'password'  => [
+            'nom'           => 'required|string|max:100',
+            'prenom'        => 'required|string|max:100',
+            'email'         => 'required|email|unique:utilisateurs,email',
+            'password'      => [
                 'required', 'string', 'min:8',
                 'regex:/[A-Z]/',
                 'regex:/[a-z]/',
                 'regex:/[0-9]/',
             ],
-            'role'      => 'required|in:encadrant,enseignant,etudiant',
-            'matricule' => 'nullable|string|max:50',
+            'role'          => 'required|in:encadrant,enseignant,etudiant',
+            'matricule'     => 'nullable|string|max:50|regex:/^[A-Z]{2}-[0-9]{6}$/',
+            'specialite_id' => 'nullable|exists:specialites,id',
         ], [
-            'password.regex' => 'Le mot de passe doit contenir au moins 8 caractères, une majuscule, une minuscule et un chiffre.',
-            'email.unique'   => 'Cette adresse email est déjà associée à un compte.',
+            'password.regex'        => 'Le mot de passe doit contenir au moins 8 caractères, une majuscule, une minuscule et un chiffre.',
+            'email.unique'          => 'Cette adresse email est déjà associée à un compte.',
+            'specialite_id.exists'  => 'La spécialité sélectionnée est invalide.',
+            'matricule.regex'       => 'Le numéro d\'inscription doit être au format XX-000000 (ex: AD-597624).',
         ]);
 
         $verificationToken = Str::random(64);
 
         // 1. Créer l'utilisateur (sans status, sans token — c'est dans comptes)
         $user = Utilisateur::create([
-            'nom'       => $request->nom,
-            'prenom'    => $request->prenom,
-            'email'     => $request->email,
-            'password'  => Hash::make($request->password),
-            'role'      => $request->role,
-            'matricule' => $request->matricule,
+            'nom'           => $request->nom,
+            'prenom'        => $request->prenom,
+            'email'         => $request->email,
+            'password'      => Hash::make($request->password),
+            'role'          => $request->role,
+            'matricule'     => $request->matricule,
+            'specialite_id' => $request->specialite_id,
+            'etablissement' => 'Institut Supérieur d\'Informatique et de Mathématiques de Monastir',
         ]);
 
         // 2. Créer l'entrée dans comptes (status=pending, token présent)

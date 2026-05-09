@@ -27,7 +27,13 @@ class EmailVerificationMail extends Mailable
     }
 
     public function content(): Content
-    {
-        return new Content(view: 'emails.verify-email');
-    }
+{
+    return new Content(
+        view: 'emails.verify-email',
+        with: [
+            'verificationUrl' => $this->verificationUrl,
+            'prenom' => $this->prenom,
+        ]
+    );
+}
 }

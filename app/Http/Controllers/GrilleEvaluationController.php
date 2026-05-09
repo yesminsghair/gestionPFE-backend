@@ -44,23 +44,21 @@ class GrilleEvaluationController extends Controller
             return response()->json($grilles->map(fn($g) => $this->format($g)));
         }
 
-        if ($user->role === 'encadrant') {
-            // 'ferme' grilles are closed — encadrants cannot access them
+        if (in_array($user->role, ['encadrant', 'jury'])) {
+            // verrouille = validated by directeur = visible to all encadrants & jury members.
             $grilles = GrilleEvaluation::with(['categories.criteres', 'chef.specialite'])
                 ->where('statut', 'verrouille')
-                ->whereIn('visibilite', ['encadrants', 'jurys'])
-                ->whereHas('chef', fn($q) => $q->where('specialite_id', $user->specialite_id))
                 ->latest()
                 ->get();
             return response()->json($grilles->map(fn($g) => $this->format($g)));
         }
 
-        if ($user->role === 'jury') {
-            // 'ferme' grilles are closed — jurys cannot access them
+        // Any user who is a member of at least one jury (président / examinateur)
+        // can also read verrouille grilles — they need it to fill the evaluation form.
+        $isJuryMember = \App\Models\JuryMembrePfe::where('enseignant_id', $user->id)->exists();
+        if ($isJuryMember) {
             $grilles = GrilleEvaluation::with(['categories.criteres', 'chef.specialite'])
                 ->where('statut', 'verrouille')
-                ->where('visibilite', 'jurys')
-                ->whereHas('chef', fn($q) => $q->where('specialite_id', $user->specialite_id))
                 ->latest()
                 ->get();
             return response()->json($grilles->map(fn($g) => $this->format($g)));
@@ -76,10 +74,9 @@ class GrilleEvaluationController extends Controller
         $data = $request->validate(['nom' => 'required|string|max:255']);
 
         $grille = GrilleEvaluation::create([
-            'chef_id'    => Auth::id(),
-            'nom'        => $data['nom'],
-            'statut'     => 'brouillon',
-            'visibilite' => 'directeur',
+            'chef_id' => Auth::id(),
+            'nom'     => $data['nom'],
+            'statut'  => 'brouillon',
         ]);
 
         return response()->json($grille->load('categories.criteres'), 201);
@@ -95,21 +92,14 @@ class GrilleEvaluationController extends Controller
 
     /**
      * PUT /api/grilles/{id}
-     *
-     * Editing is blocked once publie (submitted to directeur) OR verrouille (validated).
-     * Accepts: nom, visibilite
+     * Editing is blocked once publie or verrouille. Accepts: nom
      */
     public function update(Request $request, GrilleEvaluation $grille): JsonResponse
     {
         if (in_array($grille->statut, ['publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable (soumise ou validée).'], 403);
         }
-
-        $data = $request->validate([
-            'nom'        => 'sometimes|string|max:255',
-            'visibilite' => 'sometimes|in:directeur,encadrants,jurys',
-        ]);
-
+        $data = $request->validate(['nom' => 'sometimes|string|max:255']);
         $grille->update($data);
         return response()->json($grille->load('categories.criteres'));
     }
@@ -170,34 +160,6 @@ class GrilleEvaluationController extends Controller
         if ($isDirecteur && $wasPublie) {
             $this->notifierChefValidation($grille);
         }
-
-        return response()->json($grille->fresh());
-    }
-
-    /**
-     * POST /api/grilles/{id}/fermer
-     *
-     * Chef closes the grille at end of PFE season.
-     * Status: verrouille → ferme
-     * Effect: encadrants and jurys can no longer access this grille.
-     */
-    public function fermer(GrilleEvaluation $grille): JsonResponse
-    {
-        $user = Auth::user();
-
-        if ($user->role !== 'chef' || $grille->chef_id !== $user->id) {
-            return response()->json(['message' => 'Non autorisé.'], 403);
-        }
-
-        if ($grille->statut === 'ferme') {
-            return response()->json(['message' => 'Grille déjà fermée.'], 422);
-        }
-
-        if ($grille->statut !== 'verrouille') {
-            return response()->json(['message' => 'Seule une grille verrouillée peut être fermée.'], 422);
-        }
-
-        $grille->update(['statut' => 'ferme']);
 
         return response()->json($grille->fresh());
     }

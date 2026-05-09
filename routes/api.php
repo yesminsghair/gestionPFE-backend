@@ -19,6 +19,9 @@ use App\Http\Controllers\SuiviController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\JuryPfeController;
 use App\Http\Controllers\MessageController;
+use App\Http\Controllers\ChefDashboardController;
+use App\Http\Controllers\DirecteurDashboardController;
+use App\Http\Controllers\EncadrantDashboardController;
 
 // ─────────────────────────────────────────────
 // PUBLIC ROUTES
@@ -28,6 +31,7 @@ Route::post('/inscription',         [AuthController::class, 'inscription']);
 Route::get('/verify-email/{token}', [AuthController::class, 'verifyEmail']);
 Route::post('/forgot-password',     [AuthController::class, 'forgotPassword']);
 Route::post('/reset-password',      [AuthController::class, 'resetPassword']);
+Route::get('/specialites',          [SpecialiteController::class, 'index']); // public — needed for inscription form
 
 // ─────────────────────────────────────────────
 // PROTECTED ROUTES
@@ -45,7 +49,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('utilisateurs',         UtilisateurController::class);
 
     // ── SPECIALITES ─────────────────────────────────────────────────
-    Route::apiResource('specialites', SpecialiteController::class);
+    Route::apiResource('specialites', SpecialiteController::class)->except(['index']);
 
     // ── COMPTES ─────────────────────────────────────────────────────
     Route::apiResource('comptes', CompteController::class);
@@ -101,7 +105,6 @@ Route::middleware('auth:sanctum')->group(function () {
     // ═══════════════════════════════════════════════════════════════
 
     // ── PHASES ──────────────────────────────────────────────────────
-    // IMPORTANT: /reorder MUST come before /{phase} to avoid route collision
     Route::prefix('phases')->group(function () {
         Route::get('/',           [PhaseController::class, 'index']);
         Route::post('/',          [PhaseController::class, 'store']);
@@ -156,22 +159,25 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // ── SUIVI ───────────────────────────────────────────────────────
     Route::prefix('suivi')->group(function () {
-        Route::get('/encadrant',                  [SuiviController::class, 'parEncadrant']);
-        Route::get('/etudiant',                   [SuiviController::class, 'parEtudiant']);
-        Route::post('/valider',                   [SuiviController::class, 'validerPhase']);
-        Route::post('/rejeter',                   [SuiviController::class, 'rejeterPhase']);
+        Route::get('/encadrant', [SuiviController::class, 'parEncadrant']);
+        Route::get('/etudiant', [SuiviController::class, 'parEtudiant']);
+        Route::post('/valider', [SuiviController::class, 'validerPhase']);
+        Route::post('/rejeter', [SuiviController::class, 'rejeterPhase']);
         Route::get('/historique/{affectationId}', [SuiviController::class, 'historique']);
     });
 
     // ── JURY PFE / SOUTENANCE / RÉSULTATS ──────────────────────────
-    // Explicit model binding: {membre} → JuryMembrePfe
+    // Explicit model binding: {membre} → JuryMembrePfe, {plan} → PlanSoutenance
     Route::model('membre', \App\Models\JuryMembrePfe::class);
+    Route::model('plan',   \App\Models\PlanSoutenance::class);
 
     Route::prefix('jurys-pfe')->group(function () {
         // ⚠ Static routes MUST come before /{juryPfe} to avoid collision
-        Route::get('/projets-disponibles', [JuryPfeController::class, 'projetsDisponibles']);
-        Route::get('/etudiants-du-chef',   [JuryPfeController::class, 'etudiantsDuChef']);
-        Route::post('/publier-calendrier', [JuryPfeController::class, 'publierCalendrier']);
+        Route::get('/projets-disponibles',        [JuryPfeController::class, 'projetsDisponibles']);
+        Route::get('/etudiants-du-chef',          [JuryPfeController::class, 'etudiantsDuChef']);
+        Route::get('/prets-a-deliberer',          [JuryPfeController::class, 'pretsADeliberer']);
+        Route::get('/mes-notes',                  [JuryPfeController::class, 'mesNotes']);
+        Route::post('/publier-calendrier',        [JuryPfeController::class, 'publierCalendrier']);
 
         Route::get('/',         [JuryPfeController::class, 'index']);
         Route::post('/',        [JuryPfeController::class, 'store']);
@@ -185,12 +191,26 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/{juryPfe}/notes',      [JuryPfeController::class, 'getNotes']);
         Route::post('/{juryPfe}/notes',     [JuryPfeController::class, 'saveNote']);
+        Route::get('/{juryPfe}/ma-note',    [JuryPfeController::class, 'maNoteDetail']);
         Route::post('/{juryPfe}/deliberer', [JuryPfeController::class, 'deliberer']);
         Route::post('/{juryPfe}/publier',   [JuryPfeController::class, 'publier']);
     });
 
-    Route::get('/resultats-pfe',                 [JuryPfeController::class, 'allResultats']);
-    Route::get('/deliberation-pfe/mon-resultat', [JuryPfeController::class, 'monResultat']);
+    // ── Plans de soutenance (jury/encadrant → chef de département) ──
+    Route::get('/plans-soutenance',                        [JuryPfeController::class, 'indexPlans']);
+    Route::post('/plans-soutenance',                       [JuryPfeController::class, 'storePlan']);
+    Route::put('/plans-soutenance/{plan}/valider',         [JuryPfeController::class, 'validerPlan']);
+    Route::put('/plans-soutenance/{plan}/rejeter',         [JuryPfeController::class, 'rejeterPlan']);
+
+    // ── RÉSULTATS & DÉLIBÉRATION ─────────────────────────────────────
+    Route::get('/fiches-evaluation',                       [JuryPfeController::class, 'fichesEvaluation']);
+    Route::get('/resultats-pfe',                           [JuryPfeController::class, 'allResultats']);
+    Route::post('/resultats-pfe/publier-tous',             [JuryPfeController::class, 'publierTous']);
+    Route::post('/resultats-pfe/{resultat}/bibliotheque',  [JuryPfeController::class, 'ajouterBibliotheque']);
+    Route::post('/resultats-pfe/{resultat}/archiver',      [JuryPfeController::class, 'archiver']);
+
+    // ── ÉTUDIANT : consulter son résultat ────────────────────────────
+    Route::get('/deliberation-pfe/mon-resultat',           [JuryPfeController::class, 'monResultat']);
 
     // ── NOTIFICATIONS ────────────────────────────────────────────────
     Route::prefix('notifications')->group(function () {
@@ -208,5 +228,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/{conversation}/messages',  [MessageController::class, 'messages']);
         Route::post('/{conversation}/messages', [MessageController::class, 'sendMessage']);
         Route::put('/{conversation}/lire',      [MessageController::class, 'markConversationRead']);
+    });
+
+    // ── TABLEAUX DE BORD (GIMSI) ─────────────────────────────────────
+    Route::prefix('dashboard')->group(function () {
+        Route::get('/chef',      [ChefDashboardController::class, 'index']);
+        Route::get('/directeur', [DirecteurDashboardController::class, 'index']);
+        Route::get('/encadrant', [EncadrantDashboardController::class, 'index']);
     });
 });
