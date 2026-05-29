@@ -9,14 +9,20 @@ class Specialite extends Model
     protected $table = 'specialites';
 
     protected $fillable = [
-        'nom', 
-        'code', 
-        'description', 
-        'date_creation'  // ✅ AJOUTER ce champ
+        'nom',
+        'code',
+        'description',
+        'date_creation',
+        'capacite_max',
     ];
 
-    // Désactiver les timestamps si votre table n'a pas created_at/updated_at
-    public $timestamps = false;
+    protected $casts = [
+        'capacite_max'  => 'integer',
+        'date_creation' => 'date:Y-m-d',
+    ];
+
+    // Table has created_at / updated_at columns — keep timestamps on
+    public $timestamps = true;
 
     public function utilisateurs()
     {

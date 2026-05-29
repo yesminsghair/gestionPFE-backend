@@ -14,6 +14,7 @@ class GrilleEvaluation extends Model
         'chef_id',
         'nom',
         'statut',
+        'visibilite',
         'publie_le',
         'verrouille_le',
     ];

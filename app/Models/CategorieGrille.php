@@ -14,6 +14,7 @@ class CategorieGrille extends Model
         'grille_id',
         'nom',
         'bareme_max',
+        'color',
         'position',
     ];
 

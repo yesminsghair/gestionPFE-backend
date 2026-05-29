@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use App\Models\DemandeEncadrement;
 use App\Models\Utilisateur;
 use App\Models\Affectation;
+use App\Models\Notification;
 
 class DemandeEncadrementController extends Controller
 {
@@ -92,6 +93,15 @@ class DemandeEncadrementController extends Controller
             'statut'       => 'en_attente',
             'date_demande' => now(),
             'doc_pdf'      => $docPath,
+        ]);
+
+        // Notifier l'encadrant
+        Notification::create([
+            'user_id' => $request->encadrant_id,
+            'titre'   => 'Nouvelle demande d\'encadrement',
+            'message' => "{$etudiant->prenom} {$etudiant->nom} vous a envoyé une demande d'encadrement pour le sujet : « {$demande->sujet} ».",
+            'type'    => 'demande',
+            'lu'      => false,
         ]);
 
         return response()->json([
@@ -188,6 +198,30 @@ class DemandeEncadrementController extends Controller
         return response()->json(['message' => 'Demande annulée avec succès.']);
     }
 
+    // ── DELETE /api/demandes-encadrement/{id}/reset ───────────────
+    // Supprime une demande REJETÉE pour permettre à l'étudiant d'en soumettre une nouvelle
+    public function reset(Request $request, string $id)
+    {
+        $demande = DemandeEncadrement::findOrFail($id);
+
+        if ((int)$demande->etudiant_id !== (int)$request->user()->id) {
+            return response()->json(['message' => 'Non autorisé.'], 403);
+        }
+
+        if ($demande->statut !== 'rejetee') {
+            return response()->json([
+                'message' => 'Seules les demandes rejetées peuvent être supprimées via cette action.'
+            ], 422);
+        }
+
+        $demande->delete();
+
+        return response()->json([
+            'message' => 'Vous pouvez maintenant soumettre une nouvelle demande.',
+            'reset'   => true,
+        ]);
+    }
+
     // ── POST /api/demandes-encadrement/{id}/accepter ──────────────
     public function accepter(Request $request, string $id)
     {
@@ -200,6 +234,15 @@ class DemandeEncadrementController extends Controller
         $demande->update([
             'statut'     => 'acceptee',
             'traite_at'  => now(),
+        ]);
+
+        // Notifier l'étudiant
+        Notification::create([
+            'user_id' => $demande->etudiant_id,
+            'titre'   => 'Demande d\'encadrement acceptée',
+            'message' => "Votre demande d'encadrement pour le sujet « {$demande->sujet} » a été acceptée par {$demande->encadrant->prenom} {$demande->encadrant->nom}.",
+            'type'    => 'acceptation',
+            'lu'      => false,
         ]);
 
         return response()->json([
@@ -223,6 +266,15 @@ class DemandeEncadrementController extends Controller
             'statut'       => 'rejetee',
             'motif_rejet'  => $request->motif_rejet,
             'traite_at'    => now(),
+        ]);
+
+        // Notifier l'étudiant
+        Notification::create([
+            'user_id' => $demande->etudiant_id,
+            'titre'   => 'Demande d\'encadrement rejetée',
+            'message' => "Votre demande d'encadrement pour le sujet « {$demande->sujet} » a été rejetée par {$demande->encadrant->prenom} {$demande->encadrant->nom}. Motif : {$request->motif_rejet}",
+            'type'    => 'rejet',
+            'lu'      => false,
         ]);
 
         return response()->json([

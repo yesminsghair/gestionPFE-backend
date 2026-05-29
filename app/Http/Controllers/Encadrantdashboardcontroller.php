@@ -260,19 +260,15 @@ class EncadrantDashboardController extends Controller
             ->pluck('etudiant_id');
 
         $admis = DB::table('resultats_pfe')
-            ->join('soutenances', 'soutenances.id', '=', 'resultats_pfe.jury_id')
-            ->join('projets_pfe', 'projets_pfe.id', '=', 'soutenances.projet_id')
-            ->whereIn('projets_pfe.etudiant_id', $etudiantIds)
-            ->where('resultats_pfe.decision', 'admis')
-            ->where('resultats_pfe.publie', true)
+            ->whereIn('etudiant_id', $etudiantIds)
+            ->where('decision', 'admis')
+            ->where('publie', true)
             ->count();
 
         $ajournes = DB::table('resultats_pfe')
-            ->join('soutenances', 'soutenances.id', '=', 'resultats_pfe.jury_id')
-            ->join('projets_pfe', 'projets_pfe.id', '=', 'soutenances.projet_id')
-            ->whereIn('projets_pfe.etudiant_id', $etudiantIds)
-            ->where('resultats_pfe.decision', 'ajourne')
-            ->where('resultats_pfe.publie', true)
+            ->whereIn('etudiant_id', $etudiantIds)
+            ->where('decision', 'ajourne')
+            ->where('publie', true)
             ->count();
 
         return [
@@ -319,20 +315,16 @@ class EncadrantDashboardController extends Controller
             ->pluck('etudiant_id');
 
         $total = DB::table('resultats_pfe')
-            ->join('soutenances', 'soutenances.id', '=', 'resultats_pfe.jury_id')
-            ->join('projets_pfe', 'projets_pfe.id', '=', 'soutenances.projet_id')
-            ->whereIn('projets_pfe.etudiant_id', $etudiantIds)
-            ->where('resultats_pfe.publie', true)
+            ->whereIn('etudiant_id', $etudiantIds)
+            ->where('publie', true)
             ->count();
 
         if ($total === 0) return 0.0;
 
         $admis = DB::table('resultats_pfe')
-            ->join('soutenances', 'soutenances.id', '=', 'resultats_pfe.jury_id')
-            ->join('projets_pfe', 'projets_pfe.id', '=', 'soutenances.projet_id')
-            ->whereIn('projets_pfe.etudiant_id', $etudiantIds)
-            ->where('resultats_pfe.decision', 'admis')
-            ->where('resultats_pfe.publie', true)
+            ->whereIn('etudiant_id', $etudiantIds)
+            ->where('decision', 'admis')
+            ->where('publie', true)
             ->count();
 
         return ($admis / $total) * 100;

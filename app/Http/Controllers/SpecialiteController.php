@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Models\Specialite;
+use App\Models\Utilisateur;
 use Carbon\Carbon;
 
 class SpecialiteController extends Controller
@@ -11,7 +12,22 @@ class SpecialiteController extends Controller
     // GET /api/specialites
     public function index()
     {
-        return response()->json(Specialite::all());
+        $specialites = Specialite::all();
+
+        $chefs = Utilisateur::where('role', 'chef')
+            ->whereNotNull('specialite_id')
+            ->get(['id', 'nom', 'prenom', 'specialite_id']);
+
+        $chefMap = $chefs->keyBy('specialite_id')
+            ->map(fn($c) => trim("{$c->prenom} {$c->nom}"));
+
+        $result = $specialites->map(function ($s) use ($chefMap) {
+            return array_merge($s->toArray(), [
+                'chef_nom' => $chefMap->get($s->id) ?? null,
+            ]);
+        });
+
+        return response()->json($result);
     }
 
     // POST /api/specialites
@@ -22,9 +38,10 @@ class SpecialiteController extends Controller
             'code'          => 'required|string|max:20|unique:specialites,code',
             'description'   => 'nullable|string',
             'date_creation' => 'nullable|string',
+            'capacite_max'  => 'nullable|integer|min:1|max:9999',
         ]);
 
-        $data = $request->only(['nom', 'code', 'description']);
+        $data = $request->only(['nom', 'code', 'description', 'capacite_max']);
 
         if ($request->date_creation) {
             try {
@@ -54,9 +71,10 @@ class SpecialiteController extends Controller
             'code'          => 'required|string|max:20|unique:specialites,code,' . $id,
             'description'   => 'nullable|string',
             'date_creation' => 'nullable|string',
+            'capacite_max'  => 'nullable|integer|min:1|max:9999',
         ]);
 
-        $data = $request->only(['nom', 'code', 'description']);
+        $data = $request->only(['nom', 'code', 'description', 'capacite_max']);
 
         if ($request->date_creation) {
             try {

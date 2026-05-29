@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Utilisateur extends Authenticatable
 {
@@ -18,6 +19,7 @@ class Utilisateur extends Authenticatable
         'email',
         'password',
         'matricule',
+        'telephone',           // ← ajouté
         'role',
         'etablissement',
         'domaine_expertise',
@@ -34,65 +36,64 @@ class Utilisateur extends Authenticatable
         return $this->belongsTo(Specialite::class, 'specialite_id');
     }
 
-    /**
-     * Un utilisateur a un seul compte (1:1)
-     */
     public function compte()
     {
         return $this->hasOne(Compte::class, 'utilisateur_id');
     }
 
-    /**
-     * Un encadrant a plusieurs affectations
-     */
     public function affectationsEncadrant(): HasMany
     {
         return $this->hasMany(Affectation::class, 'encadrant_id');
     }
 
-    /**
-     * Un étudiant a une affectation
-     */
     public function affectation(): \Illuminate\Database\Eloquent\Relations\HasOne
     {
         return $this->hasOne(Affectation::class, 'etudiant_id');
     }
 
     /**
-     * Un enseignant peut être membre de plusieurs jurys
+     * All voeux submissions by this encadrant/enseignant.
+     * Foreign key is enseignant_id (matches voeux_encadrement table).
      */
+    public function voeuxEncadrement(): HasMany
+    {
+        return $this->hasMany(VoeuxEncadrement::class, 'enseignant_id');
+    }
+
+    /**
+     * The latest submitted voeu for this encadrant — used by
+     * AffectationController::encadrantsDisponibles() to read constraints.
+     *
+     * Uses latestOfMany() (Laravel 8.42+) to get the most recently submitted row.
+     * Falls back gracefully to null if no voeu has been submitted yet.
+     */
+    public function voeuxActif(): HasOne
+    {
+        return $this->hasOne(VoeuxEncadrement::class, 'enseignant_id')
+                    ->where('statut', 'soumis')
+                    ->latestOfMany('soumis_at');
+    }
+
     public function juryMembres(): HasMany
     {
         return $this->hasMany(JuryMembre::class, 'enseignant_id');
     }
 
-    /**
-     * Un enseignant peut avoir plusieurs notes
-     */
     public function notesJury(): HasMany
     {
         return $this->hasMany(NoteJury::class, 'membre_id');
     }
 
-    /**
-     * Un encadrant peut organiser plusieurs réunions
-     */
     public function reunionsEncadrant(): HasMany
     {
         return $this->hasMany(Reunion::class, 'encadrant_id');
     }
 
-    /**
-     * Un étudiant peut avoir plusieurs réunions
-     */
     public function reunionsEtudiant(): HasMany
     {
         return $this->hasMany(Reunion::class, 'etudiant_id');
     }
 
-    /**
-     * Un étudiant peut déposer plusieurs livrables
-     */
     public function livrables(): HasMany
     {
         return $this->hasMany(Livrable::class, 'etudiant_id');
@@ -120,8 +121,6 @@ class Utilisateur extends Authenticatable
         return (bool) ($this->compte?->actif ?? false);
     }
 
-    // ── Accesseur pour le nom complet ──────────────────────────────
-    
     public function getNomCompletAttribute(): string
     {
         return $this->nom . ' ' . $this->prenom;

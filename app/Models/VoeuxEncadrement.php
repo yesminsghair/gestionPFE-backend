@@ -9,13 +9,12 @@ class VoeuxEncadrement extends Model
     protected $table = 'voeux_encadrement';
 
     protected $fillable = [
-        'formulaire_id', 'enseignant_id', 'nbre_etudiants', 'nbre_max_pfe',
-        'disponibilite', 'encadrement', 'specialites', 'themes',
+        'formulaire_id', 'enseignant_id', 'nbre_max_pfe',
+        'disponibilite', 'encadrement', 'themes',
         'commentaire', 'cotutelle', 'statut', 'soumis_at',
     ];
 
     protected $casts = [
-        'specialites' => 'array',
         'cotutelle'   => 'boolean',
         'soumis_at'   => 'datetime',
     ];

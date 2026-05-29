@@ -34,6 +34,7 @@ class JuryPfeController extends Controller
             'projet.etudiant',
             'projet.encadrant',
             'membres.enseignant',
+            'notes',       // needed for nb_fiches in format()
             'resultat',
         ])->get()->map(fn($j) => $this->format($j));
 
@@ -51,7 +52,7 @@ class JuryPfeController extends Controller
         $projet = ProjetPfe::find($data['projet_id']);
         if ($projet?->encadrant_id) {
             JuryMembrePfe::create([
-                'jury_id'       => $jury->id,
+                'soutenance_id' => $jury->id,
                 'enseignant_id' => $projet->encadrant_id,
                 'fonction'      => 'encadrant',
             ]);
@@ -63,7 +64,7 @@ class JuryPfeController extends Controller
     public function show(Soutenance $juryPfe): JsonResponse
     {
         return response()->json($this->format(
-            $juryPfe->load('projet.etudiant', 'projet.encadrant', 'membres.enseignant', 'resultat')
+            $juryPfe->load('projet.etudiant', 'projet.encadrant', 'membres.enseignant', 'notes', 'resultat')
         ));
     }
 
@@ -78,33 +79,51 @@ class JuryPfeController extends Controller
         ]);
 
         // ── Salle conflict guard ──────────────────────────────────────────────
-        // If a salle is being set or changed, verify it is not already booked
-        // at the same date/time by another soutenance.
-        if (!empty($data['salle']) && !empty($data['date_soutenance'])) {
-            $heureDebut = $data['heure_debut'] ?? $juryPfe->heure_debut;
-            $heureFin   = $data['heure_fin']   ?? $juryPfe->heure_fin;
+        // Resolve the effective salle/date/time after this update by merging
+        // incoming $data over the already-persisted values.  This ensures the
+        // check runs correctly for partial updates (e.g. only salle changes).
+        $effectiveSalle      = $data['salle']            ?? $juryPfe->salle;
+        $effectiveDate       = $data['date_soutenance']  ?? $juryPfe->date_soutenance;
+        $effectiveHeureDebut = $data['heure_debut']      ?? $juryPfe->heure_debut;
+        $effectiveHeureFin   = $data['heure_fin']        ?? $juryPfe->heure_fin;
 
-            if ($heureDebut && $heureFin) {
-                $toMin = fn(string $t): int => (int) substr($t, 0, 2) * 60 + (int) substr($t, 3, 2);
+        if ($effectiveSalle && $effectiveDate && $effectiveHeureDebut && $effectiveHeureFin) {
+            // Normalise to HH:MM so both DB values (H:i:s) and form values (H:i) compare correctly.
+            $toMin = function (string $t): int {
+                $parts = explode(':', $t);
+                return (int) $parts[0] * 60 + (int) ($parts[1] ?? 0);
+            };
 
-                $conflict = Soutenance::where('salle', $data['salle'])
-                    ->where('date_soutenance', $data['date_soutenance'])
-                    ->where('id', '!=', $juryPfe->id)
-                    ->whereNotNull('heure_debut')
-                    ->whereNotNull('heure_fin')
-                    ->get()
-                    ->first(fn($s) =>
-                        $toMin($heureDebut) < $toMin($s->heure_fin) &&
-                        $toMin($s->heure_debut) < $toMin($heureFin)
-                    );
+            $newStart = $toMin($effectiveHeureDebut);
+            $newEnd   = $toMin($effectiveHeureFin);
 
-                if ($conflict) {
-                    return response()->json([
-                        'message' => "La salle \"" . $data['salle'] . "\" est deja reservee a ce creneau"
-                            . " (" . $conflict->heure_debut . "-" . $conflict->heure_fin . ")."
-                            . " Veuillez choisir une autre salle.",
-                    ], 422);
-                }
+            if ($newEnd <= $newStart) {
+                return response()->json([
+                    'message' => "L'heure de fin doit être après l'heure de début.",
+                ], 422);
+            }
+
+            $conflict = Soutenance::where('salle', $effectiveSalle)
+                ->where('date_soutenance', $effectiveDate)
+                ->where('id', '!=', $juryPfe->id)
+                ->whereNotNull('heure_debut')
+                ->whereNotNull('heure_fin')
+                ->get()
+                ->first(function ($s) use ($toMin, $newStart, $newEnd) {
+                    $existStart = $toMin($s->heure_debut);
+                    $existEnd   = $toMin($s->heure_fin);
+                    // Overlap: new interval starts before existing ends AND existing starts before new ends
+                    return $newStart < $existEnd && $existStart < $newEnd;
+                });
+
+            if ($conflict) {
+                $conflictDebut = substr($conflict->heure_debut, 0, 5);
+                $conflictFin   = substr($conflict->heure_fin,   0, 5);
+                return response()->json([
+                    'message' => "La salle \"{$effectiveSalle}\" est déjà réservée à ce créneau"
+                        . " ({$conflictDebut}–{$conflictFin})."
+                        . " Veuillez choisir une autre salle ou un autre horaire.",
+                ], 422);
             }
         }
         // ─────────────────────────────────────────────────────────────────────
@@ -166,7 +185,58 @@ class JuryPfeController extends Controller
 
     public function getNotes(Soutenance $juryPfe): JsonResponse
     {
-        return response()->json($juryPfe->notes()->with('enseignant')->get());
+        $juryPfe->loadMissing('membres', 'membres.enseignant');
+        $notes = $juryPfe->notes()->with('enseignant')->get();
+
+        $result = $notes->map(function ($note) use ($juryPfe) {
+            $critereRows = DB::table('notes_grille_pfe as ngp')
+                ->join('criteres_evaluation as ce', 'ce.id', '=', 'ngp.critere_id')
+                ->join('categories_grille as cg',   'cg.id', '=', 'ce.categorie_id')
+                ->where('ngp.note_pfe_id', $note->id)
+                ->select(
+                    'ngp.note as note_critere',
+                    'ce.id as critere_id',
+                    'ce.nom as critere_nom',
+                    'ce.bareme_max as critere_bareme',
+                    'cg.id as cat_id',
+                    'cg.nom as cat_nom',
+                    'cg.bareme_max as cat_bareme'
+                )
+                ->get();
+
+            $categories = $critereRows->groupBy('cat_id')->map(function ($rows, $catId) {
+                $first = $rows->first();
+                return [
+                    'id'      => $catId,
+                    'nom'     => $first->cat_nom,
+                    'bareme'  => $first->cat_bareme,
+                    'note'    => round($rows->sum('note_critere'), 2),
+                    'criteres' => $rows->map(fn($r) => [
+                        'id'     => $r->critere_id,
+                        'nom'    => $r->critere_nom,
+                        'bareme' => $r->critere_bareme,
+                        'note'   => $r->note_critere,
+                    ])->values(),
+                ];
+            })->values();
+
+            $membre = $juryPfe->membres->firstWhere('enseignant_id', $note->enseignant_id);
+
+            return [
+                'id'            => $note->id,
+                'enseignant_id' => $note->enseignant_id,
+                'membre_nom'    => $note->enseignant
+                    ? trim($note->enseignant->prenom . ' ' . $note->enseignant->nom)
+                    : '--',
+                'fonction'      => $membre?->fonction,
+                'note'          => $note->note,
+                'commentaire'   => $note->commentaire,
+                'finalise'      => $note->finalise,
+                'categories'    => $categories,
+            ];
+        });
+
+        return response()->json($result);
     }
 
     /**
@@ -209,7 +279,7 @@ class JuryPfeController extends Controller
         DB::beginTransaction();
         try {
             $note = NotePfe::updateOrCreate(
-                ['jury_id' => $juryPfe->id, 'enseignant_id' => $data['enseignant_id']],
+                ['soutenance_id' => $juryPfe->id, 'enseignant_id' => $data['enseignant_id']],
                 [
                     'note'        => $data['note'],
                     'commentaire' => $data['commentaire'] ?? null,
@@ -241,65 +311,66 @@ class JuryPfeController extends Controller
         }
     }
 
-    // ── Fiches d'évaluation (chef view) ──────────────────────────
+
 
     /**
      * GET /api/fiches-evaluation
      *
      * Returns ALL jurys in the chef's department grouped by student, with
      * each jury member's note (= "fiche") and the per-critère breakdown.
-     *
-     * Shape per group:
-     * {
-     *   jury_id, etudiant_nom, projet_titre, matricule,
-     *   resultat: {note_finale, mention, decision} | null,
-     *   fiches: [{
-     *     id (NotePfe id),
-     *     membre_jury,   // name
-     *     fonction,
-     *     note_totale,
-     *     commentaire,
-     *     date,
-     *     categories: [{ id, nom, bareme, note, criteres:[{id,nom,bareme,note}] }]
-     *   }]
-     * }
      */
     public function fichesEvaluation(): JsonResponse
     {
         $chef = Auth::user();
 
+        if (!$chef || !$chef->specialite_id) {
+            return response()->json([]);
+        }
+
         $jurys = Soutenance::with([
             'projet.etudiant',
+            'projet.encadrant',     // ← NEW: encadrant_nom at group level
             'membres.enseignant',
-            'notes',          // NotePfe rows
+            'notes',
             'resultat',
         ])
         ->whereHas('projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
         ->get();
 
         $result = $jurys->map(function ($jury) {
+
+            // ── president lookup ──────────────────────────────────────
+            $presidentMembre = $jury->membres->firstWhere('fonction', 'president');
+            $presidentEns    = $presidentMembre?->enseignant;
+
+            // ── fiches (one per notes_pfe row) ────────────────────────
             $fiches = $jury->notes->map(function ($note) use ($jury) {
                 $membre = $jury->membres->firstWhere('enseignant_id', $note->enseignant_id);
-                $ens    = $membre?->enseignant;
+                $ens    = $membre?->enseignant ?? $note->enseignant; // fall back to eager-loaded relation
 
                 // Load per-critère details
                 $critereRows = DB::table('notes_grille_pfe as ngp')
                     ->join('criteres_evaluation as ce', 'ce.id', '=', 'ngp.critere_id')
                     ->join('categories_grille as cg', 'cg.id', '=', 'ce.categorie_id')
                     ->where('ngp.note_pfe_id', $note->id)
-                    ->select('ngp.note as note_critere', 'ce.id as critere_id', 'ce.nom as critere_nom',
-                             'ce.bareme_max as critere_bareme', 'cg.id as cat_id', 'cg.nom as cat_nom',
-                             'cg.bareme_max as cat_bareme')
+                    ->select(
+                        'ngp.note as note_critere',
+                        'ce.id as critere_id',
+                        'ce.nom as critere_nom',
+                        'ce.bareme_max as critere_bareme',
+                        'cg.id as cat_id',
+                        'cg.nom as cat_nom',
+                        'cg.bareme_max as cat_bareme'
+                    )
                     ->get();
 
-                // Group by category
                 $categories = $critereRows->groupBy('cat_id')->map(function ($rows, $catId) {
                     $first = $rows->first();
                     return [
-                        'id'      => $catId,
-                        'nom'     => $first->cat_nom,
-                        'bareme'  => $first->cat_bareme,
-                        'note'    => round($rows->sum('note_critere'), 2),
+                        'id'       => $catId,
+                        'nom'      => $first->cat_nom,
+                        'bareme'   => $first->cat_bareme,
+                        'note'     => round($rows->sum('note_critere'), 2),
                         'criteres' => $rows->map(fn($r) => [
                             'id'     => $r->critere_id,
                             'nom'    => $r->critere_nom,
@@ -310,28 +381,48 @@ class JuryPfeController extends Controller
                 })->values();
 
                 return [
-                    'id'          => $note->id,
-                    'membre_jury' => $ens ? trim($ens->prenom . ' ' . $ens->nom) : '--',
-                    'fonction'    => $membre?->fonction,
-                    'note_totale' => $note->note,
-                    'commentaire' => $note->commentaire,
-                    'finalise'    => $note->finalise,
-                    'date'        => $note->updated_at?->format('d/m/Y'),
-                    'categories'  => $categories,
+                    'id'              => $note->id,
+                    'membre_id'       => $note->enseignant_id,                           // NEW
+                    'membre_nom'      => $ens                                             // RENAMED (was membre_jury)
+                        ? trim($ens->prenom . ' ' . $ens->nom)
+                        : '--',
+                    'fonction'        => $membre?->fonction,
+                    'note_totale'     => $note->note,
+                    'commentaire'     => $note->commentaire,                              // already present — now surfaced in UI
+                    'finalise'        => (bool) $note->finalise,
+                    'date_soumission' => $note->updated_at?->format('d/m/Y H:i'),        // NEW: actual submission timestamp
+                    'categories'      => $categories,
                 ];
             })->values();
 
             return [
-                'jury_id'       => $jury->id,
-                'etudiant_nom'  => trim(($jury->projet?->etudiant?->prenom ?? '') . ' ' . ($jury->projet?->etudiant?->nom ?? '')),
-                'matricule'     => $jury->projet?->etudiant?->matricule ?? '--',
-                'projet_titre'  => $jury->projet?->titre ?? 'Sans titre',
-                'resultat'      => $jury->resultat ? [
+                'jury_id'         => $jury->id,
+                'etudiant_nom'    => trim(
+                    ($jury->projet?->etudiant?->prenom ?? '') . ' ' .
+                    ($jury->projet?->etudiant?->nom    ?? '')
+                ),
+                'matricule'       => $jury->projet?->etudiant?->matricule ?? '--',
+                'projet_titre'    => $jury->projet?->titre ?? 'Sans titre',
+                'encadrant_nom'   => $jury->projet?->encadrant                           // NEW
+                    ? trim(
+                        ($jury->projet->encadrant->prenom ?? '') . ' ' .
+                        ($jury->projet->encadrant->nom    ?? '')
+                      )
+                    : '--',
+                'president_nom'   => $presidentEns                                       // NEW
+                    ? trim($presidentEns->prenom . ' ' . $presidentEns->nom)
+                    : null,
+                'president_id'    => $presidentMembre?->enseignant_id,                   // NEW
+                'date_soutenance' => $jury->date_soutenance,                             // NEW
+                'heure_debut'     => $jury->heure_debut ? substr($jury->heure_debut, 0, 5) : null, // NEW
+                'salle'           => $jury->salle,                                       // NEW
+                'resultat'        => $jury->resultat ? [
                     'note_finale' => $jury->resultat->note_finale,
                     'mention'     => $jury->resultat->mention,
                     'decision'    => $jury->resultat->decision,
+                    'publie'      => (bool) $jury->resultat->publie,                     // NEW
                 ] : null,
-                'fiches'        => $fiches,
+                'fiches'          => $fiches,
             ];
         });
 
@@ -349,6 +440,11 @@ class JuryPfeController extends Controller
     {
         $chef = Auth::user();
 
+        if (!$chef || !$chef->specialite_id) {
+            return response()->json([]);
+        }
+
+        // Seul le president evalue -- pret des que sa fiche est finalisee
         $jurys = Soutenance::with(['projet.etudiant', 'notes', 'membres'])
             ->whereHas('projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
             ->doesntHave('resultat')
@@ -356,7 +452,10 @@ class JuryPfeController extends Controller
             ->filter(function ($jury) {
                 $presidentId = $jury->membres->firstWhere('fonction', 'president')?->enseignant_id;
                 if (!$presidentId) return false;
-                return $jury->notes->where('enseignant_id', $presidentId)->where('finalise', true)->isNotEmpty();
+                return $jury->notes
+                    ->where('enseignant_id', $presidentId)
+                    ->where('finalise', true)
+                    ->isNotEmpty();
             });
 
         $result = $jurys->map(function ($jury) {
@@ -397,13 +496,15 @@ class JuryPfeController extends Controller
             ->first();
 
         if (!$notePresident) {
-            return response()->json(['message' => "Le president n'a pas encore soumis sa fiche d'evaluation."], 422);
+            return response()->json([
+                'message' => "Le president n'a pas encore soumis sa fiche d'evaluation.",
+            ], 422);
         }
 
         $noteFinale = round((float) $notePresident->note, 2);
 
         $resultat = ResultatPfe::updateOrCreate(
-            ['jury_id' => $juryPfe->id],
+            ['soutenance_id' => $juryPfe->id],
             [
                 'etudiant_id' => $juryPfe->projet->etudiant_id,
                 'note_finale' => $noteFinale,
@@ -462,24 +563,29 @@ class JuryPfeController extends Controller
     {
         $chef = Auth::user();
 
+        if (!$chef || !$chef->specialite_id) {
+            return response()->json(['message' => '0 résultat(s) publiés.']);
+        }
+
         $resultats = ResultatPfe::where('publie', false)
-            ->whereHas('jury.projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
-            ->with('jury.projet.etudiant', 'jury.projet.encadrant')
+            ->whereHas('soutenance.projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
+            ->with('soutenance.projet.etudiant', 'soutenance.projet.encadrant')
             ->get();
 
         foreach ($resultats as $r) {
             $r->update(['publie' => true, 'publie_le' => now()]);
 
-            $etudiantId  = $r->jury->projet->etudiant_id;
-            $encadrantId = $r->jury->projet->encadrant_id;
-            $etudiant    = $r->jury->projet->etudiant;
-            $nom         = trim(($etudiant->prenom ?? '') . ' ' . ($etudiant->nom ?? ''));
+            $etudiantId  = $r->soutenance?->projet?->etudiant_id;
+            $encadrantId = $r->soutenance?->projet?->encadrant_id;
+            $etudiant    = $r->soutenance?->projet?->etudiant;
+            $nom         = trim(($etudiant?->prenom ?? '') . ' ' . ($etudiant?->nom ?? ''));
 
-            Notification::create([
-                'user_id' => $etudiantId,
-                'message' => 'Vos résultats de soutenance PFE sont disponibles. Connectez-vous pour les consulter.',
-            ]);
-
+            if ($etudiantId) {
+                Notification::create([
+                    'user_id' => $etudiantId,
+                    'message' => 'Vos résultats de soutenance PFE sont disponibles. Connectez-vous pour les consulter.',
+                ]);
+            }
             if ($encadrantId) {
                 Notification::create([
                     'user_id' => $encadrantId,
@@ -530,21 +636,27 @@ class JuryPfeController extends Controller
     {
         $chef = Auth::user();
 
-        $resultats = ResultatPfe::with(['jury.projet.etudiant', 'jury.projet.encadrant'])
-            ->whereHas('jury.projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
+        if (!$chef || !$chef->specialite_id) {
+            return response()->json([]);
+        }
+
+        $resultats = ResultatPfe::with(['soutenance.projet.etudiant', 'soutenance.projet.encadrant'])
+            ->whereHas('soutenance.projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
             ->latest()
             ->get()
             ->map(fn($r) => [
                 'id'           => $r->id,
-                'jury_id'      => $r->jury_id,
-                'etudiant_nom' => trim(($r->jury->projet->etudiant->prenom ?? '') . ' ' . ($r->jury->projet->etudiant->nom ?? '')),
-                'projet_titre' => $r->jury->projet->titre,
+                'jury_id'      => $r->soutenance_id,   // frontend key kept as jury_id
+                'etudiant_nom' => trim(($r->soutenance?->projet?->etudiant?->prenom ?? '') . ' ' . ($r->soutenance?->projet?->etudiant?->nom ?? '')),
+                'matricule'    => $r->soutenance?->projet?->etudiant?->matricule ?? '--',
+                'projet_titre' => $r->soutenance?->projet?->titre ?? 'Sans titre',
                 'note_finale'  => $r->note_finale,
                 'mention'      => $r->mention,
                 'decision'     => $r->decision,
-                'publie'       => $r->publie,
-                'en_biblio'    => $r->en_biblio ?? false,
-                'archive'      => $r->archive ?? false,
+                'publie'       => (bool) $r->publie,
+                'publie_le'    => optional($r->publie_le)->format('d/m/Y'),
+                'en_biblio'    => (bool) ($r->en_biblio ?? false),
+                'archive'      => (bool) ($r->archive ?? false),
             ]);
 
         return response()->json($resultats);
@@ -556,9 +668,9 @@ class JuryPfeController extends Controller
     {
         $etudiantId = $request->user()->id;
 
-        $resultat = ResultatPfe::whereHas('jury.projet', fn($q) =>
+        $resultat = ResultatPfe::whereHas('soutenance.projet', fn($q) =>
             $q->where('etudiant_id', $etudiantId)
-        )->where('publie', true)->with('jury.projet')->first();
+        )->where('publie', true)->with('soutenance.projet')->first();
 
         if (!$resultat) return response()->json(null);
 
@@ -567,7 +679,7 @@ class JuryPfeController extends Controller
             'mention'      => $resultat->mention,
             'decision'     => $resultat->decision,
             'publie_le'    => $resultat->publie_le?->format('d/m/Y'),
-            'projet_titre' => $resultat->jury->projet->titre,
+            'projet_titre' => $resultat->soutenance?->projet?->titre ?? 'Sans titre',
         ]);
     }
 
@@ -762,12 +874,12 @@ class JuryPfeController extends Controller
         $userId = Auth::id();
 
         $notes = NotePfe::where('enseignant_id', $userId)
-            ->with('jury.projet.etudiant')
+            ->with('soutenance.projet.etudiant')
             ->latest()
             ->get()
             ->map(fn($n) => [
                 'id'          => $n->id,
-                'jury_id'     => $n->jury_id,
+                'jury_id'     => $n->soutenance_id,
                 'note'        => $n->note,
                 'commentaire' => $n->commentaire,
                 'finalise'    => $n->finalise,
@@ -786,7 +898,7 @@ class JuryPfeController extends Controller
     {
         $userId = Auth::id();
 
-        $note = NotePfe::where('jury_id', $juryPfe->id)
+        $note = NotePfe::where('soutenance_id', $juryPfe->id)
             ->where('enseignant_id', $userId)
             ->first();
 
@@ -804,7 +916,7 @@ class JuryPfeController extends Controller
 
         return response()->json([
             'id'          => $note->id,
-            'jury_id'     => $note->jury_id,
+            'jury_id'     => $note->soutenance_id,
             'note'        => $note->note,
             'commentaire' => $note->commentaire,
             'finalise'    => $note->finalise,

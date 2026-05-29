@@ -34,7 +34,6 @@ class VoeuxEncadrementController extends Controller
     /**
      * GET all voeux for a formulaire (chef view)
      * GET /api/voeux-encadrement/liste?formulaire_id=X
-     * FIX: new endpoint so the réponses panel in ListeFormulaires works
      */
     public function liste(Request $request)
     {
@@ -42,7 +41,6 @@ class VoeuxEncadrementController extends Controller
             'formulaire_id' => 'required|exists:formulaires_voeux,id'
         ]);
 
-        // Only the chef who owns the formulaire may list all voeux
         $formulaire = FormulaireVoeux::where('chef_id', $request->user()->id)
             ->findOrFail($request->formulaire_id);
 
@@ -57,9 +55,7 @@ class VoeuxEncadrementController extends Controller
                         ? $v->enseignant->prenom . ' ' . $v->enseignant->nom
                         : null,
                     'disponibilite'  => $v->disponibilite,
-                    'nbre_etudiants' => $v->nbre_etudiants,
                     'nbre_max_pfe'   => $v->nbre_max_pfe,
-                    'specialites'    => $v->specialites,
                     'themes'         => $v->themes,
                     'encadrement'    => $v->encadrement,
                     'commentaire'    => $v->commentaire,
@@ -81,9 +77,7 @@ class VoeuxEncadrementController extends Controller
         $request->validate([
             'formulaire_id'  => 'required|exists:formulaires_voeux,id',
             'disponibilite'  => 'nullable|in:oui,partielle,non',
-            'nbre_etudiants' => 'nullable|integer',
-            'nbre_max_pfe'   => 'nullable|integer',
-            'specialites'    => 'nullable|array',
+            'nbre_max_pfe'   => 'nullable|integer|min:0',
             'encadrement'    => 'nullable|string',
             'themes'         => 'nullable|string',
             'commentaire'    => 'nullable|string',
@@ -97,6 +91,14 @@ class VoeuxEncadrementController extends Controller
             return response()->json(['message' => 'locked'], 422);
         }
 
+        $cap     = $formulaire->nb_max_etudiants ?? 10;
+        $nbrePfe = min((int) ($request->nbre_max_pfe ?? 0), $cap);
+
+        $wasAlreadySoumis = VoeuxEncadrement::where('formulaire_id', $request->formulaire_id)
+            ->where('enseignant_id', $request->user()->id)
+            ->where('statut', 'soumis')
+            ->exists();
+
         $voeu = VoeuxEncadrement::updateOrCreate(
             [
                 'formulaire_id' => $request->formulaire_id,
@@ -104,9 +106,7 @@ class VoeuxEncadrementController extends Controller
             ],
             [
                 'disponibilite'  => $request->disponibilite,
-                'nbre_etudiants' => $request->nbre_etudiants ?? 0,
-                'nbre_max_pfe'   => $request->nbre_max_pfe   ?? 3,
-                'specialites'    => $request->specialites,
+                'nbre_max_pfe'   => $nbrePfe,
                 'encadrement'    => $request->encadrement,
                 'themes'         => $request->themes,
                 'commentaire'    => $request->commentaire,
@@ -115,6 +115,11 @@ class VoeuxEncadrementController extends Controller
                 'soumis_at'      => $request->statut === 'soumis' ? Carbon::now() : null,
             ]
         );
+
+        // Notify chef on first submission OR when re-submitting after update
+        if ($request->statut === 'soumis') {
+            FormulaireVoeuxController::notifierChefSoumission($voeu);
+        }
 
         $roleChanged = false;
 

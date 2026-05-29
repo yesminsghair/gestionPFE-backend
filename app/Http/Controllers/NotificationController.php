@@ -21,6 +21,7 @@ class NotificationController extends Controller
 
     public function markAsRead(Notification $notification): JsonResponse
     {
+        abort_if($notification->user_id !== Auth::id(), 403);
         $notification->update(['lu' => true]);
         return response()->json($notification);
     }

@@ -8,7 +8,21 @@ class Contrainte extends Model
 {
     protected $table = 'contraintes';
 
-    protected $fillable = ['affectation_id', 'type', 'valeur'];
+    protected $fillable = [
+        'affectation_id',
+        'chef_id',
+        'type',
+        'encadrant_id',
+        'etudiant_id',
+        'cap',
+        'raison',
+    ];
+
+    protected $casts = [
+        'encadrant_id' => 'integer',
+        'etudiant_id'  => 'integer',
+        'cap'          => 'integer',
+    ];
 
     public function affectation()
     {

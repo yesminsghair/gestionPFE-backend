@@ -1,7 +1,9 @@
 <?php
-
+//importation du façade/classe Route qui contient toutes les méthodes de définition des Routes
+//le mecanisme centrale de routage 
 use Illuminate\Support\Facades\Route;
 
+//importation des classes de controleurs utilisés dans l'app ( chaq methode dans un controleur correspond à une méthode spécifique )
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\SpecialiteController;
 use App\Http\Controllers\UtilisateurController;
@@ -18,13 +20,16 @@ use App\Http\Controllers\ReunionController;
 use App\Http\Controllers\SuiviController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\JuryPfeController;
+use App\Http\Controllers\ResultatPfeController;
+use App\Http\Controllers\ArchivageBiblioController;
 use App\Http\Controllers\MessageController;
 use App\Http\Controllers\ChefDashboardController;
 use App\Http\Controllers\DirecteurDashboardController;
 use App\Http\Controllers\EncadrantDashboardController;
+use App\Http\Controllers\AiChatController;
 
 // ─────────────────────────────────────────────
-// PUBLIC ROUTES
+// PUBLIC ROUTES : l'importation des routes accessible par tous ( meme sans etre connecté )
 // ─────────────────────────────────────────────
 Route::post('/login',               [AuthController::class, 'login']);
 Route::post('/inscription',         [AuthController::class, 'inscription']);
@@ -36,11 +41,13 @@ Route::get('/specialites',          [SpecialiteController::class, 'index']); // 
 // ─────────────────────────────────────────────
 // PROTECTED ROUTES
 // ─────────────────────────────────────────────
+Broadcast::routes(['middleware' => ['auth:sanctum']]);
 Route::middleware('auth:sanctum')->group(function () {
 
     // ── AUTH ────────────────────────────────────────────────────────
     Route::post('/logout', [AuthController::class, 'logout']);
-    Route::get('/me',      [AuthController::class, 'me']);
+    Route::get('/me',               [AuthController::class, 'me']);
+    Route::post('/change-password', [AuthController::class, 'changePassword']);
 
     // ── UTILISATEURS ────────────────────────────────────────────────
     Route::get('/utilisateurs/pending',        [UtilisateurController::class, 'pending']);
@@ -63,13 +70,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/chefs/{id}/modifier',  [ChefController::class, 'modifier']);
 
     // ── FORMULAIRES DE VOEUX ────────────────────────────────────────
+    // ⚠ Static GET routes must come before {id} wildcard routes.
     Route::get   ('/formulaires-voeux',                              [FormulaireVoeuxController::class, 'index']);
+    Route::get   ('/formulaires-voeux/enseignants-de-ma-specialite', [FormulaireVoeuxController::class, 'enseignantsDeMaSpecialite']);
     Route::post  ('/formulaires-voeux',                              [FormulaireVoeuxController::class, 'store']);
+    // Wildcard {id} routes below
+    Route::get   ('/formulaires-voeux/{id}/reponses',                [FormulaireVoeuxController::class, 'reponses']);
     Route::put   ('/formulaires-voeux/{id}',                         [FormulaireVoeuxController::class, 'update']);
     Route::patch ('/formulaires-voeux/{id}/publier',                 [FormulaireVoeuxController::class, 'publier']);
     Route::patch ('/formulaires-voeux/{id}/verrouiller',             [FormulaireVoeuxController::class, 'verrouiller']);
     Route::delete('/formulaires-voeux/{id}',                         [FormulaireVoeuxController::class, 'destroy']);
-    Route::get   ('/formulaires-voeux/enseignants-de-ma-specialite', [FormulaireVoeuxController::class, 'enseignantsDeMaSpecialite']);
 
     // ── VOEUX D'ENCADREMENT ─────────────────────────────────────────
     Route::get ('/voeux-encadrement',       [VoeuxEncadrementController::class, 'index']);
@@ -84,20 +94,32 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post  ('/demandes-encadrement/{id}/accepter', [DemandeEncadrementController::class, 'accepter']);
     Route::post  ('/demandes-encadrement/{id}/rejeter',  [DemandeEncadrementController::class, 'rejeter']);
     Route::post  ('/demandes-encadrement/{id}/modifier', [DemandeEncadrementController::class, 'modifier']);
+    Route::delete('/demandes-encadrement/{id}/reset',   [DemandeEncadrementController::class, 'reset']);
 
     // ── AFFECTATIONS ────────────────────────────────────────────────
+    // ⚠ All static/named routes MUST come before any {id} wildcard routes.
     Route::prefix('affectations')->group(function () {
-        Route::get('/',                           [AffectationController::class, 'index']);
+        // Named GET routes (no wildcards)
         Route::get('/mode',                       [AffectationController::class, 'getMode']);
         Route::get('/mon-affectation',            [AffectationController::class, 'monAffectation']);
-        Route::put('/mon-affectation/sujet',      [AffectationController::class, 'saveSujet']);
         Route::get('/encadrants-disponibles',     [AffectationController::class, 'encadrantsDisponibles']);
         Route::get('/mes-affectations',           [AffectationController::class, 'mesAffectations']);
         Route::get('/etudiants-de-ma-specialite', [AffectationController::class, 'etudiantsDeMaSpecialite']);
+        // FIX: contraintes routes were missing — GET must be above any {id} wildcard
+        Route::get('/contraintes',                [AffectationController::class, 'indexContraintes']);
+
+        // Named POST / PUT / DELETE routes
         Route::post('/save-mode',                 [AffectationController::class, 'saveMode']);
+        Route::post('/notifier-mode',             [AffectationController::class, 'notifierMode']);
         Route::post('/batch',                     [AffectationController::class, 'batch']);
         Route::post('/diffuser',                  [AffectationController::class, 'diffuser']);
+        // FIX: contraintes POST was missing
+        Route::post('/contraintes',               [AffectationController::class, 'storeContraintes']);
+        Route::put('/mon-affectation/sujet',      [AffectationController::class, 'saveSujet']);
         Route::delete('/reinitialiser',           [AffectationController::class, 'reinitialiser']);
+
+        // Collection route last
+        Route::get('/',                           [AffectationController::class, 'index']);
     });
 
     // ═══════════════════════════════════════════════════════════════
@@ -123,6 +145,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/{grille}',                               [GrilleEvaluationController::class, 'destroy']);
         Route::post('/{grille}/publier',                         [GrilleEvaluationController::class, 'publier']);
         Route::post('/{grille}/verrouiller',                     [GrilleEvaluationController::class, 'verrouiller']);
+        Route::post('/{grille}/rejeter',                         [GrilleEvaluationController::class, 'rejeter']);
         Route::post('/{grille}/fermer',                          [GrilleEvaluationController::class, 'fermer']);
         Route::post('/{grille}/categories',                      [GrilleEvaluationController::class, 'addCategorie']);
         Route::put('/{grille}/categories/{categorie}',           [GrilleEvaluationController::class, 'updateCategorie']);
@@ -203,11 +226,25 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/plans-soutenance/{plan}/rejeter',         [JuryPfeController::class, 'rejeterPlan']);
 
     // ── RÉSULTATS & DÉLIBÉRATION ─────────────────────────────────────
-    Route::get('/fiches-evaluation',                       [JuryPfeController::class, 'fichesEvaluation']);
-    Route::get('/resultats-pfe',                           [JuryPfeController::class, 'allResultats']);
-    Route::post('/resultats-pfe/publier-tous',             [JuryPfeController::class, 'publierTous']);
-    Route::post('/resultats-pfe/{resultat}/bibliotheque',  [JuryPfeController::class, 'ajouterBibliotheque']);
-    Route::post('/resultats-pfe/{resultat}/archiver',      [JuryPfeController::class, 'archiver']);
+    // ⚠ All static routes MUST come before /{resultat} wildcard routes
+    Route::get ('/fiches-evaluation', [JuryPfeController::class, 'fichesEvaluation']);
+
+    Route::prefix('resultats-pfe')->group(function () {
+        // Static routes first
+        Route::get   ('/',               [ResultatPfeController::class, 'index']);         // ALL non-archived → ConsulterResultatFinal.vue
+        Route::get   ('/publies',        [ResultatPfeController::class, 'publies']);       // publie=true only → student-facing
+        Route::post  ('/publier-tous',   [ResultatPfeController::class, 'publierTous']);   // bulk publish
+        Route::post  ('/archiver-tous',  [ResultatPfeController::class, 'archiverTous']);  // bulk archive
+        Route::get   ('/archives',       [ArchivageBiblioController::class, 'archives']);      // Archives.vue
+        Route::delete('/archives/{date}',[ArchivageBiblioController::class, 'supprimerArchive']); // delete archive group
+        Route::get   ('/bibliotheque',   [ArchivageBiblioController::class, 'bibliotheque']);  // BiblioPfe.vue
+
+        // Wildcard routes LAST
+        Route::post('/{resultat}/publier',      [ResultatPfeController::class, 'publier']);           // single publish
+        Route::post('/{resultat}/decision',     [ResultatPfeController::class, 'decision']);          // toggle admis/ajourne
+        Route::post('/{resultat}/archiver',     [ResultatPfeController::class, 'archiver']);          // single archive
+        Route::post('/{resultat}/bibliotheque', [ResultatPfeController::class, 'ajouterBibliotheque']); // biblio toggle
+    });
 
     // ── ÉTUDIANT : consulter son résultat ────────────────────────────
     Route::get('/deliberation-pfe/mon-resultat',           [JuryPfeController::class, 'monResultat']);
@@ -236,4 +273,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/directeur', [DirecteurDashboardController::class, 'index']);
         Route::get('/encadrant', [EncadrantDashboardController::class, 'index']);
     });
+
+    // ── CHATBOT IA ───────────────────────────────────────────────────
+    Route::post('/ai-chat', [AiChatController::class, 'chat']);
 });

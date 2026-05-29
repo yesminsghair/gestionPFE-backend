@@ -99,7 +99,10 @@ class GrilleEvaluationController extends Controller
         if (in_array($grille->statut, ['publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable (soumise ou validée).'], 403);
         }
-        $data = $request->validate(['nom' => 'sometimes|string|max:255']);
+        $data = $request->validate([
+            'nom'        => 'sometimes|string|max:255',
+            'visibilite' => 'sometimes|in:encadrant_jury,jury_only',
+        ]);
         $grille->update($data);
         return response()->json($grille->load('categories.criteres'));
     }
@@ -133,6 +136,24 @@ class GrilleEvaluationController extends Controller
 
         $grille->update(['statut' => 'publie', 'publie_le' => now()]);
         $this->notifierDirecteur($grille);
+
+        return response()->json($grille->fresh());
+    }
+
+    /**
+     * POST /api/grilles/{id}/rejeter
+     *
+     * Directeur rejects a submitted grille → resets to brouillon.
+     * The chef receives a notification and can correct and resubmit.
+     */
+    public function rejeter(GrilleEvaluation $grille): JsonResponse
+    {
+        if ($grille->statut !== 'publie') {
+            return response()->json(['message' => 'Seule une grille soumise peut être rejetée.'], 422);
+        }
+
+        $grille->update(['statut' => 'brouillon']);
+        $this->notifierChefRejet($grille);
 
         return response()->json($grille->fresh());
     }
@@ -319,6 +340,20 @@ class GrilleEvaluationController extends Controller
             ]);
         } catch (\Throwable $e) {
             Log::warning('GrilleEvaluationController::notifierChefValidation: ' . $e->getMessage());
+        }
+    }
+
+    /** Notify the chef that the directeur rejected his grille. */
+    private function notifierChefRejet(GrilleEvaluation $grille): void
+    {
+        try {
+            Notification::create([
+                'user_id'    => $grille->chef_id,
+                'message'    => "Votre grille d'évaluation a été rejetée par le directeur de stage. Vous pouvez la corriger et la resoumettre.",
+                'created_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('GrilleEvaluationController::notifierChefRejet: ' . $e->getMessage());
         }
     }
 }

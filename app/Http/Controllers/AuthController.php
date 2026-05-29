@@ -10,6 +10,7 @@ use Illuminate\Support\Str;
 use Carbon\Carbon;
 use App\Models\Utilisateur;
 use App\Models\Compte;
+use App\Models\Notification;
 use App\Mail\EmailVerificationMail;
 use App\Mail\ResetPasswordMail;
 
@@ -25,37 +26,30 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        // Charger l'utilisateur avec son compte en une seule requête
         $user = Utilisateur::with('compte')->where('email', $request->email)->first();
 
-        // Email introuvable ou mot de passe incorrect
         if (!$user || !Hash::check($request->password, $user->password)) {
             return response()->json(['message' => 'Email ou mot de passe incorrect.'], 401);
         }
 
         $compte = $user->compte;
 
-        // Pas de compte encore (ne devrait pas arriver, mais sécurité)
         if (!$compte) {
             return response()->json(['message' => 'Compte introuvable. Contactez un administrateur.'], 403);
         }
 
-        // Email non encore vérifié (token toujours présent)
         if ($compte->email_verification_token !== null && $compte->status === 'pending') {
             return response()->json(['message' => 'Veuillez confirmer votre adresse email avant de vous connecter.'], 403);
         }
 
-        // Email vérifié mais en attente de validation admin
         if ($compte->status === 'pending' && $compte->email_verification_token === null) {
             return response()->json(['message' => 'Votre compte est en attente de validation par un administrateur.'], 403);
         }
 
-        // Compte désactivé
         if ($compte->status === 'inactive') {
             return response()->json(['message' => 'Votre compte a été désactivé. Contactez un administrateur.'], 403);
         }
 
-        // Génère le token Sanctum
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
@@ -84,7 +78,6 @@ class AuthController extends Controller
     // ══════════════════════════════════════════════
     public function me(Request $request)
     {
-        // Charge l'utilisateur avec son compte et sa spécialité
         $user = Utilisateur::with(['compte', 'specialite'])
                            ->find($request->user()->id);
 
@@ -95,13 +88,13 @@ class AuthController extends Controller
             'email'            => $user->email,
             'role'             => $user->role,
             'matricule'        => $user->matricule,
+            'telephone'        => $user->telephone,
             'etablissement'    => $user->etablissement,
             'domaine_expertise'=> $user->domaine_expertise,
             'specialite_id'    => $user->specialite_id,
             'specialite'       => $user->specialite,
             'date_affectation' => $user->date_affectation,
             'created_at'       => $user->created_at,
-            // Champs compte
             'status'           => $user->compte?->status,
             'actif'            => $user->compte?->actif,
             'email_verified_at'=> $user->compte?->email_verified_at,
@@ -136,7 +129,7 @@ class AuthController extends Controller
 
         $verificationToken = Str::random(64);
 
-        // 1. Créer l'utilisateur (sans status, sans token — c'est dans comptes)
+        // 1. Créer l'utilisateur
         $user = Utilisateur::create([
             'nom'           => $request->nom,
             'prenom'        => $request->prenom,
@@ -148,7 +141,7 @@ class AuthController extends Controller
             'etablissement' => 'Institut Supérieur d\'Informatique et de Mathématiques de Monastir',
         ]);
 
-        // 2. Créer l'entrée dans comptes (status=pending, token présent)
+        // 2. Créer l'entrée dans comptes
         Compte::create([
             'utilisateur_id'           => $user->id,
             'email_verification_token' => $verificationToken,
@@ -158,9 +151,29 @@ class AuthController extends Controller
             'activated_at'             => null,
         ]);
 
-        // 3. Envoyer l'email de confirmation
+        // 3. Envoyer l'email de confirmation à l'utilisateur
         $verificationUrl = config('app.frontend_url') . '/verify-email/' . $verificationToken;
         Mail::to($user->email)->send(new EmailVerificationMail($verificationUrl, $user->prenom));
+
+        // 4. Créer une notification dans la table notifications pour chaque admin
+        $roleLabel = match($user->role) {
+            'etudiant'   => 'Étudiant',
+            'enseignant' => 'Enseignant',
+            'encadrant'  => 'Encadrant',
+            'directeur'  => 'Directeur',
+            default      => ucfirst($user->role),
+        };
+
+        $admins = Utilisateur::where('role', 'admin')->get();
+        foreach ($admins as $admin) {
+            Notification::create([
+                'user_id' => $admin->id,
+                'titre'   => 'Nouvelle demande de compte',
+                'message' => "{$user->prenom} {$user->nom} ({$roleLabel}) a soumis une demande de création de compte.",
+                'type'    => 'nouvelle_demande',
+                'lu'      => false,
+            ]);
+        }
 
         return response()->json([
             'message' => 'Inscription réussie. Vérifiez votre email pour confirmer votre compte.',
@@ -172,7 +185,6 @@ class AuthController extends Controller
     // ══════════════════════════════════════════════
     public function verifyEmail(string $token)
     {
-        // Chercher le compte par son token (pas l'utilisateur)
         $compte = Compte::where('email_verification_token', $token)
                         ->with('utilisateur')
                         ->first();
@@ -181,19 +193,38 @@ class AuthController extends Controller
             return response()->json(['message' => 'Lien de validation invalide ou déjà utilisé.'], 422);
         }
 
-        // Token expiré (24h depuis la création du compte)
         if (Carbon::now()->diffInHours($compte->created_at) > 24) {
-            // Supprimer le compte ET l'utilisateur (cascade)
             $compte->utilisateur?->delete();
             return response()->json(['message' => 'expired'], 410);
         }
 
-        // Marquer l'email comme vérifié — effacer le token
         $compte->update([
             'email_verified_at'        => Carbon::now(),
             'email_verification_token' => null,
-            // status reste 'pending' — l'admin valide ensuite
         ]);
+
+        // Notify all admins that this user has confirmed their email and is ready for review
+        $user = $compte->utilisateur;
+        if ($user) {
+            $roleLabel = match($user->role) {
+                'etudiant'   => 'Étudiant',
+                'enseignant' => 'Enseignant',
+                'encadrant'  => 'Encadrant',
+                'directeur'  => 'Directeur',
+                default      => ucfirst($user->role),
+            };
+
+            $admins = Utilisateur::where('role', 'admin')->get();
+            foreach ($admins as $admin) {
+                Notification::create([
+                    'user_id' => $admin->id,
+                    'titre'   => 'Email confirmé — demande prête à examiner',
+                    'message' => "{$user->prenom} {$user->nom} ({$roleLabel}) a confirmé son adresse email. Sa demande de création de compte peut maintenant être traitée.",
+                    'type'    => 'email_confirme',
+                    'lu'      => false,
+                ]);
+            }
+        }
 
         return response()->json([
             'message' => 'Email confirmé. Votre compte est en attente de validation par un administrateur.',
@@ -209,7 +240,6 @@ class AuthController extends Controller
 
         $user = Utilisateur::where('email', $request->email)->first();
 
-        // Toujours le même message (sécurité — ne pas révéler si l'email existe)
         if (!$user) {
             return response()->json(['message' => 'Si cet email existe, un lien de réinitialisation a été envoyé.']);
         }
