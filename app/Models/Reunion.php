@@ -18,10 +18,14 @@ class Reunion extends Model
         'lieu',
         'compte_rendu',
         'motif',
+        'rappel_scheduled_at',
+        'rappel_fired',
     ];
 
     protected $casts = [
-        'date_reunion' => 'datetime',
+        'date_reunion'        => 'datetime',
+        'rappel_scheduled_at' => 'datetime',
+        'rappel_fired'        => 'boolean',
     ];
 
     public function encadrant(): BelongsTo

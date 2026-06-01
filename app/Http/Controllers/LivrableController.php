@@ -20,10 +20,41 @@ class LivrableController extends Controller
         $user = Auth::user();
         if (!$user) return response()->json(['message' => 'Unauthenticated'], 401);
 
-        return Livrable::with('phase')
-            ->where('etudiant_id', $user->id)
-            ->orderByDesc('depose_le')
-            ->get();
+        return response()->json(
+            Livrable::with('phase')
+                ->where('etudiant_id', $user->id)
+                ->whereNotIn('statut', ['retire', 'remplace'])
+                ->orderByDesc('depose_le')
+                ->get()
+                ->map(fn($l) => array_merge($l->toArray(), [
+                    'fichier_url' => $l->fichier ? asset('storage/' . $l->fichier) : null,
+                ]))
+        );
+    }
+
+    // GET /api/livrables/historique
+    public function historique()
+    {
+        $user = Auth::user();
+        if (!$user) return response()->json(['message' => 'Unauthenticated'], 401);
+
+        return response()->json(
+            Livrable::with('phase')
+                ->where('etudiant_id', $user->id)
+                ->orderByDesc('depose_le')
+                ->get()
+                ->map(fn($l) => [
+                    'id'          => $l->id,
+                    'phase_id'    => $l->phase_id,
+                    'phase_nom'   => optional($l->phase)->nom,
+                    'file_name'   => $l->file_name ?: ($l->fichier ? basename($l->fichier) : 'fichier.pdf'),
+                    'fichier_url' => $l->fichier ? asset('storage/' . $l->fichier) : null,
+                    'statut'      => $l->statut,
+                    'commentaire' => $l->commentaire,
+                    'version'     => $l->version ?? 1,
+                    'depose_le'   => $l->depose_le,
+                ])
+        );
     }
 
     // GET /api/livrables/encadrant
@@ -38,6 +69,7 @@ class LivrableController extends Controller
                   ->from('affectations')
                   ->where('encadrant_id', $user->id);
             })
+            ->whereNotIn('statut', ['retire', 'remplace'])
             ->orderByDesc('depose_le')
             ->get();
 
@@ -56,10 +88,13 @@ class LivrableController extends Controller
                 'etudiant_id'  => $l->etudiant_id,
                 'etudiant_nom' => trim((optional($l->etudiant)->nom ?? '') . ' ' . (optional($l->etudiant)->prenom ?? '')),
                 'fichier'      => $l->fichier,
+                'fichier_url'  => $l->fichier ? asset('storage/' . $l->fichier) : null,  // ← FIXED
                 'file_name'    => $l->file_name ?: ($l->fichier ? basename($l->fichier) : 'fichier.pdf'),
                 'statut'       => $l->statut,
                 'commentaire'  => $l->commentaire,
                 'verrouille'   => $l->verrouille,
+                'version'      => $l->version ?? 1,
+                'remplace_le'  => $l->remplace_le ?? null,
                 'depose_le'    => $l->depose_le,
             ];
         });
@@ -87,40 +122,59 @@ class LivrableController extends Controller
         $originalName = $request->file('fichier')->getClientOriginalName();
         $path         = $request->file('fichier')->store('livrables/' . $user->id, 'public');
 
+        // Detect whether this is a replacement BEFORE we soft-delete the old one
+        $previousLivrable = Livrable::where('phase_id', $phase->id)
+            ->where('etudiant_id', $user->id)
+            ->where('verrouille', false)
+            ->whereNull('remplace_le')
+            ->latest('depose_le')
+            ->first();
+
+        $isReplacement   = $previousLivrable !== null;
+        $previousVersion = $isReplacement ? ($previousLivrable->version ?? 1) : 0;
+
+        // Soft-replace: stamp previous livrables with remplace_le so history is preserved
+        if ($isReplacement) {
+            $previousLivrable->update(['remplace_le' => now(), 'statut' => 'remplace']);
+        }
+
         $livrable = Livrable::create([
             'phase_id'    => $phase->id,
             'etudiant_id' => $user->id,
             'fichier'     => $path,
             'file_name'   => $originalName,
             'statut'      => 'en_attente',
+            'version'     => $previousVersion + 1,
             'depose_le'   => now(),
         ]);
 
         $affectation = Affectation::where('etudiant_id', $user->id)->first();
+        $etudiantNom = trim($user->prenom . ' ' . $user->nom);
 
         if ($affectation) {
-            // Update suivi (encadrement process — still uses affectations)
             SuiviEtudiantPhase::updateOrCreate(
                 ['affectation_id' => $affectation->id, 'phase_id' => $phase->id],
                 ['statut' => 'en_cours', 'date_lancement' => now()]
             );
 
-            // Notify encadrant
             if ($affectation->encadrant_id) {
-                Notification::create([
-                    'user_id'    => $affectation->encadrant_id,
-                    'message'    => trim($user->prenom . ' ' . $user->nom) . " a déposé un livrable pour la phase \"{$phase->nom}\".",
-                    'lu'         => false,
-                    'created_at' => now(),
-                ]);
+                if ($isReplacement) {
+                    Notification::create([
+                        'user_id'    => $affectation->encadrant_id,
+                        'message'    => "{$etudiantNom} a remplacé son livrable pour la phase \"{$phase->nom}\" (version {$livrable->version}).",
+                        'lu'         => false,
+                        'created_at' => now(),
+                    ]);
+                } else {
+                    Notification::create([
+                        'user_id'    => $affectation->encadrant_id,
+                        'message'    => "{$etudiantNom} a déposé un livrable pour la phase \"{$phase->nom}\".",
+                        'lu'         => false,
+                        'created_at' => now(),
+                    ]);
+                }
             }
 
-            // ─────────────────────────────────────────────────────────
-            // Bootstrap the ProjetPfe record on first deposit.
-            // We pull etudiant_id and encadrant_id from the affectation
-            // ONCE here, then the jury/soutenance chain works entirely
-            // from projets_pfe — it never touches affectations again.
-            // ─────────────────────────────────────────────────────────
             ProjetPfe::firstOrCreate(
                 ['etudiant_id' => $user->id],
                 [
@@ -132,10 +186,12 @@ class LivrableController extends Controller
             );
         }
 
-        return response()->json($livrable->load('phase'), 201);
+        return response()->json(array_merge($livrable->load('phase')->toArray(), [
+            'fichier_url' => $livrable->fichier ? asset('storage/' . $livrable->fichier) : null,
+        ]), 201);
     }
 
-    // DOWNLOAD
+    // GET /api/livrables/{livrable}/download
     public function download(Livrable $livrable)
     {
         $fullPath = Storage::disk('public')->path($livrable->fichier);
@@ -145,7 +201,7 @@ class LivrableController extends Controller
         ]);
     }
 
-    // VALIDER
+    // PUT /api/livrables/{livrable}/valider
     public function valider(Request $request, Livrable $livrable)
     {
         $encadrant    = Auth::user();
@@ -161,7 +217,6 @@ class LivrableController extends Controller
                 ['statut' => 'validee', 'date_validation' => now(), 'commentaire_encadrant' => $request->commentaire]
             );
 
-            // Ensure ProjetPfe exists (safety net — store() usually creates it)
             ProjetPfe::firstOrCreate(
                 ['etudiant_id' => $livrable->etudiant_id],
                 [
@@ -181,10 +236,10 @@ class LivrableController extends Controller
             'created_at' => now(),
         ]);
 
-        return $livrable->load('phase');
+        return response()->json($livrable->load('phase'));
     }
 
-    // REJETER
+    // PUT /api/livrables/{livrable}/rejeter
     public function rejeter(Request $request, Livrable $livrable)
     {
         $request->validate(['commentaire' => 'required|string']);
@@ -210,26 +265,37 @@ class LivrableController extends Controller
             'created_at' => now(),
         ]);
 
-        return $livrable->load('phase');
+        return response()->json($livrable->load('phase'));
     }
 
-    // VERROUILLER
+    // PUT /api/livrables/{livrable}/verrouiller
     public function verrouiller(Livrable $livrable)
     {
         $livrable->update(['verrouille' => true]);
-        return $livrable;
+        return response()->json($livrable);
     }
 
-    // DELETE
+    // DELETE /api/livrables/{livrable}
     public function destroy(Livrable $livrable)
     {
         if ($livrable->verrouille) {
             return response()->json(['message' => 'Verrouillé'], 403);
         }
-        if ($livrable->fichier) {
-            Storage::disk('public')->delete($livrable->fichier);
+
+        // Soft-delete: mark as retired so history is preserved
+        $livrable->update([
+            'statut'      => 'retire',
+            'remplace_le' => now(),
+        ]);
+
+        // Also remove the suivi record so the encadrant's view resets for this phase
+        $affectation = Affectation::where('etudiant_id', $livrable->etudiant_id)->first();
+        if ($affectation) {
+            SuiviEtudiantPhase::where('affectation_id', $affectation->id)
+                ->where('phase_id', $livrable->phase_id)
+                ->delete();
         }
-        $livrable->delete();
-        return response()->json(['message' => 'Supprimé']);
+
+        return response()->json(['message' => 'Retiré']);
     }
 }

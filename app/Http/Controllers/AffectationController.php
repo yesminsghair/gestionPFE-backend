@@ -575,4 +575,30 @@ public function diffuser(Request $request)
         'adresse'        => $a->etudiant?->adresse,
     ];
 }
+
+    // ── GET /api/affectations/mes-etudiants ─────────────────────────────────
+    // Lightweight endpoint used by ReunionEncadrant to populate the student
+    // dropdown. Does not depend on phases, suivi, or livrables.
+    public function mesEtudiants(Request $request)
+    {
+        $user = $request->user();
+
+        $affs = Affectation::with('etudiant')
+            ->where('encadrant_id', $user->id)
+            ->get();
+
+        return response()->json(
+            $affs
+                ->filter(fn($a) => $a->etudiant !== null)
+                ->map(fn($a) => [
+                    'id'         => $a->etudiant->id,
+                    'prenom'     => $a->etudiant->prenom ?? '',
+                    'nom'        => $a->etudiant->nom    ?? '',
+                    'nomComplet' => trim(($a->etudiant->prenom ?? '') . ' ' . ($a->etudiant->nom ?? '')),
+                    'email'      => $a->etudiant->email  ?? null,
+                ])
+                ->values()
+        );
+    }
+
 }

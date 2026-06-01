@@ -19,7 +19,9 @@ use App\Http\Controllers\LivrableController;
 use App\Http\Controllers\ReunionController;
 use App\Http\Controllers\SuiviController;
 use App\Http\Controllers\NotificationController;
-use App\Http\Controllers\JuryPfeController;
+use App\Http\Controllers\JuryCompositionController;
+use App\Http\Controllers\SoutenancePlanificationController;
+use App\Http\Controllers\EvaluationPfeController;
 use App\Http\Controllers\ResultatPfeController;
 use App\Http\Controllers\ArchivageBiblioController;
 use App\Http\Controllers\MessageController;
@@ -104,6 +106,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/mon-affectation',            [AffectationController::class, 'monAffectation']);
         Route::get('/encadrants-disponibles',     [AffectationController::class, 'encadrantsDisponibles']);
         Route::get('/mes-affectations',           [AffectationController::class, 'mesAffectations']);
+        Route::get('/mes-etudiants',              [AffectationController::class, 'mesEtudiants']);
         Route::get('/etudiants-de-ma-specialite', [AffectationController::class, 'etudiantsDeMaSpecialite']);
         // FIX: contraintes routes were missing — GET must be above any {id} wildcard
         Route::get('/contraintes',                [AffectationController::class, 'indexContraintes']);
@@ -128,12 +131,18 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // ── PHASES ──────────────────────────────────────────────────────
     Route::prefix('phases')->group(function () {
-        Route::get('/',           [PhaseController::class, 'index']);
-        Route::post('/',          [PhaseController::class, 'store']);
-        Route::put('/reorder',    [PhaseController::class, 'reorder']);
-        Route::get('/{phase}',    [PhaseController::class, 'show']);
-        Route::put('/{phase}',    [PhaseController::class, 'update']);
-        Route::delete('/{phase}', [PhaseController::class, 'destroy']);
+        Route::get('/',                [PhaseController::class, 'index']);
+        Route::post('/',               [PhaseController::class, 'store']);
+        Route::put('/reorder',         [PhaseController::class, 'reorder']);
+
+        // ⚠ Static named routes MUST come before /{phase} wildcard
+        Route::get('/livrable-stats',  [PhaseController::class, 'livrableStats']);
+        Route::post('/reinitialiser',  [PhaseController::class, 'reinitialiser']);
+
+        // Wildcard routes last
+        Route::get('/{phase}',         [PhaseController::class, 'show']);
+        Route::put('/{phase}',         [PhaseController::class, 'update']);
+        Route::delete('/{phase}',      [PhaseController::class, 'destroy']);
     });
 
     // ── GRILLES D'EVALUATION ────────────────────────────────────────
@@ -146,18 +155,22 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{grille}/publier',                         [GrilleEvaluationController::class, 'publier']);
         Route::post('/{grille}/verrouiller',                     [GrilleEvaluationController::class, 'verrouiller']);
         Route::post('/{grille}/rejeter',                         [GrilleEvaluationController::class, 'rejeter']);
+        Route::post('/{grille}/activer',                         [GrilleEvaluationController::class, 'activer']);
         Route::post('/{grille}/fermer',                          [GrilleEvaluationController::class, 'fermer']);
         Route::post('/{grille}/categories',                      [GrilleEvaluationController::class, 'addCategorie']);
         Route::put('/{grille}/categories/{categorie}',           [GrilleEvaluationController::class, 'updateCategorie']);
         Route::delete('/{grille}/categories/{categorie}',        [GrilleEvaluationController::class, 'deleteCategorie']);
         Route::post('/{grille}/categories/{categorie}/criteres', [GrilleEvaluationController::class, 'addCritere']);
+        Route::post('{grille}/reinitialiser', [GrilleEvaluationController::class, 'reinitialiser']);
     });
     Route::put('/criteres/{critere}',    [GrilleEvaluationController::class, 'updateCritere']);
     Route::delete('/criteres/{critere}', [GrilleEvaluationController::class, 'deleteCritere']);
 
     // ── LIVRABLES ───────────────────────────────────────────────────
     Route::prefix('livrables')->group(function () {
+        // ⚠ Static named routes MUST come before /{livrable} wildcard
         Route::get('/encadrant',              [LivrableController::class, 'parEncadrant']);
+        Route::get('/historique',             [LivrableController::class, 'historique']);
         Route::get('/phase/{phase}',          [LivrableController::class, 'byPhase']);
         Route::get('/',                       [LivrableController::class, 'index']);
         Route::post('/',                      [LivrableController::class, 'store']);
@@ -178,6 +191,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{reunion}/confirmer',    [ReunionController::class, 'confirmer']);
         Route::post('/{reunion}/annuler',      [ReunionController::class, 'annuler']);
         Route::post('/{reunion}/compte-rendu', [ReunionController::class, 'compteRendu']);
+        Route::post('/{reunion}/rappel',        [ReunionController::class, 'rappel']);
+        Route::post('/{reunion}/rappel/annuler', [ReunionController::class, 'annulerRappel']);
     });
 
     // ── SUIVI ───────────────────────────────────────────────────────
@@ -189,45 +204,78 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/historique/{affectationId}', [SuiviController::class, 'historique']);
     });
 
-    // ── JURY PFE / SOUTENANCE / RÉSULTATS ──────────────────────────
-    // Explicit model binding: {membre} → JuryMembrePfe, {plan} → PlanSoutenance
-    Route::model('membre', \App\Models\JuryMembrePfe::class);
-    Route::model('plan',   \App\Models\PlanSoutenance::class);
+    // ── PROJETS PFE (étudiant) ──────────────────────────────────────
+    Route::prefix('projets')->group(function () {
+        // GET /api/projets/mon-projet — returns the authenticated student's ProjetPfe
+        Route::get('/mon-projet', function () {
+            $projet = \App\Models\ProjetPfe::where('etudiant_id', auth()->id())->first();
+            return response()->json($projet); // null if none — frontend handles it
+        });
+    });
+
+    // ── JURY PFE : COMPOSITION ───────────────────────────────────────
+    // Explicit model binding: {plan} → PlanSoutenance
+    Route::model('plan', \App\Models\PlanSoutenance::class);
 
     Route::prefix('jurys-pfe')->group(function () {
         // ⚠ Static routes MUST come before /{juryPfe} to avoid collision
-        Route::get('/projets-disponibles',        [JuryPfeController::class, 'projetsDisponibles']);
-        Route::get('/etudiants-du-chef',          [JuryPfeController::class, 'etudiantsDuChef']);
-        Route::get('/prets-a-deliberer',          [JuryPfeController::class, 'pretsADeliberer']);
-        Route::get('/mes-notes',                  [JuryPfeController::class, 'mesNotes']);
-        Route::post('/publier-calendrier',        [JuryPfeController::class, 'publierCalendrier']);
 
-        Route::get('/',         [JuryPfeController::class, 'index']);
-        Route::post('/',        [JuryPfeController::class, 'store']);
-        Route::get('/{juryPfe}',    [JuryPfeController::class, 'show']);
-        Route::put('/{juryPfe}',    [JuryPfeController::class, 'update']);
-        Route::delete('/{juryPfe}', [JuryPfeController::class, 'destroy']);
+        // -- JuryCompositionController (static) --
+        Route::get('/etudiants-du-chef',       [JuryCompositionController::class, 'etudiantsDuChef']);
+        Route::get('/enseignants-departement', [JuryCompositionController::class, 'enseignantsDuDepartement']);
 
-        Route::post('/{juryPfe}/membres',            [JuryPfeController::class, 'addMembre']);
-        Route::put('/{juryPfe}/membres/{membre}',    [JuryPfeController::class, 'updateMembre']);
-        Route::delete('/{juryPfe}/membres/{membre}', [JuryPfeController::class, 'removeMembre']);
+        // -- SoutenancePlanificationController (static) --
+        // ⚠ MUST be here, before /{juryPfe}, otherwise Laravel routes POST /jurys-pfe/publier-calendrier
+        //   into the /{juryPfe} wildcard and returns 405 / model-not-found.
+        Route::post('/publier-calendrier', [SoutenancePlanificationController::class, 'publierCalendrier']);
 
-        Route::get('/{juryPfe}/notes',      [JuryPfeController::class, 'getNotes']);
-        Route::post('/{juryPfe}/notes',     [JuryPfeController::class, 'saveNote']);
-        Route::get('/{juryPfe}/ma-note',    [JuryPfeController::class, 'maNoteDetail']);
-        Route::post('/{juryPfe}/deliberer', [JuryPfeController::class, 'deliberer']);
-        Route::post('/{juryPfe}/publier',   [JuryPfeController::class, 'publier']);
+        // -- EvaluationPfeController (static) --
+        Route::get('/prets-a-deliberer', [EvaluationPfeController::class, 'pretsADeliberer']);
+        Route::get('/mes-notes',         [EvaluationPfeController::class, 'mesNotes']);
+
+        // ── Wildcard routes below ──────────────────────────────────────
+        Route::get('/',             [JuryCompositionController::class, 'index']);
+        Route::post('/',            [JuryCompositionController::class, 'store']);
+        Route::get('/{juryPfe}',    [JuryCompositionController::class, 'show']);
+        Route::delete('/{juryPfe}', [JuryCompositionController::class, 'destroy']);
+
+        // SoutenancePlanificationController — update date/salle/heure/statut
+        Route::put('/{juryPfe}', [SoutenancePlanificationController::class, 'update']);
+
+        // Role assignment (flat columns: president_id / examinateur_id)
+        Route::put('/{juryPfe}/president',     [JuryCompositionController::class, 'setPresident']);
+        Route::put('/{juryPfe}/examinateur',   [JuryCompositionController::class, 'setExaminateur']);
+        Route::delete('/{juryPfe}/president',  [JuryCompositionController::class, 'clearPresident']);
+        Route::delete('/{juryPfe}/examinateur',[JuryCompositionController::class, 'clearExaminateur']);
+
+        Route::post('/{juryPfe}/publier-jury',  [JuryCompositionController::class, 'publierJury']);
+        Route::post('/{juryPfe}/modifier-jury', [JuryCompositionController::class, 'modifierJury']);
+
+        Route::get('/{juryPfe}/notes',      [EvaluationPfeController::class, 'getNotes']);
+        Route::post('/{juryPfe}/notes',     [EvaluationPfeController::class, 'saveNote']);
+        Route::get('/{juryPfe}/ma-note',    [EvaluationPfeController::class, 'maNoteDetail']);
+        Route::post('/{juryPfe}/deliberer', [EvaluationPfeController::class, 'deliberer']);
+        Route::post('/{juryPfe}/publier',   [EvaluationPfeController::class, 'publier']);
     });
 
-    // ── Plans de soutenance (jury/encadrant → chef de département) ──
-    Route::get('/plans-soutenance',                        [JuryPfeController::class, 'indexPlans']);
-    Route::post('/plans-soutenance',                       [JuryPfeController::class, 'storePlan']);
-    Route::put('/plans-soutenance/{plan}/valider',         [JuryPfeController::class, 'validerPlan']);
-    Route::put('/plans-soutenance/{plan}/rejeter',         [JuryPfeController::class, 'rejeterPlan']);
+    // ── SOUTENANCE : PLANIFICATION ───────────────────────────────────
+    // ⚠ publier-calendrier is now inside the jurys-pfe prefix group above (before /{juryPfe})
+    Route::get('/soutenances/salles-occupees',      [SoutenancePlanificationController::class, 'sallesOccupees']);
+    Route::get('/soutenances/enseignants-occupes',  [SoutenancePlanificationController::class, 'enseignantsOccupes']);
 
-    // ── RÉSULTATS & DÉLIBÉRATION ─────────────────────────────────────
+    Route::get   ('/plans-soutenance',                    [SoutenancePlanificationController::class, 'indexPlans']);
+    Route::post  ('/plans-soutenance',                    [SoutenancePlanificationController::class, 'storePlan']);
+    Route::put   ('/plans-soutenance/{plan}/valider',     [SoutenancePlanificationController::class, 'validerPlan']);
+    Route::put   ('/plans-soutenance/{plan}/rejeter',     [SoutenancePlanificationController::class, 'rejeterPlan']);
+    Route::delete('/plans-soutenance/{plan}',             [SoutenancePlanificationController::class, 'destroyPlan']);
+    // Called by chef OR proposant to delete a rejected plan
+    Route::delete('/plans-soutenance/{plan}/chef',        [SoutenancePlanificationController::class, 'destroyPlanChef']);
+    // Transitions soutenance statut → 'termine' when evaluation is submitted
+    Route::put('/soutenances/{soutenance}/terminer',      [SoutenancePlanificationController::class, 'terminerSoutenance']);
+
+    // ── ÉVALUATION : FICHES & RÉSULTATS ─────────────────────────────
     // ⚠ All static routes MUST come before /{resultat} wildcard routes
-    Route::get ('/fiches-evaluation', [JuryPfeController::class, 'fichesEvaluation']);
+    Route::get('/fiches-evaluation', [EvaluationPfeController::class, 'fichesEvaluation']);
 
     Route::prefix('resultats-pfe')->group(function () {
         // Static routes first
@@ -247,7 +295,7 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── ÉTUDIANT : consulter son résultat ────────────────────────────
-    Route::get('/deliberation-pfe/mon-resultat',           [JuryPfeController::class, 'monResultat']);
+    Route::get('/deliberation-pfe/mon-resultat', [EvaluationPfeController::class, 'monResultat']);
 
     // ── NOTIFICATIONS ────────────────────────────────────────────────
     Route::prefix('notifications')->group(function () {

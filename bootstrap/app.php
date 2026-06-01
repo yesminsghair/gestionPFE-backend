@@ -15,5 +15,6 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prepend(HandleCors::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        // Always return JSON for /api/* routes instead of redirecting to a login page
+        $exceptions->shouldRenderJsonWhen(fn($request) => $request->is("api/*"));
     })->create();

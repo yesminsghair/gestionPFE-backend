@@ -1,4 +1,5 @@
 <?php
+
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
@@ -7,31 +8,32 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
- * soutenances  (anciennement jurys_pfe — renommée)
- * ─────────────────────────────────────────────────────────
+ * soutenances — validated defence session
+ * ────────────────────────────────────────────────────────
  * id                  bigint PK
- * projet_id           FK → projets_pfe.id
- * date_soutenance     date nullable
- * heure_debut         time nullable
- * heure_fin           time nullable
- * salle               varchar(100) nullable
- * statut              enum('en_attente','planifie','termine','annule')
+ * jury_id             FK → jury_membres_pfe.id  (nullable)
+ * projet_id           FK → projets_pfe.id        (kept for notes/resultat scoping)
+ * date_soutenance     date       (LOCKED — comes from validated plan, cannot be changed)
+ * heure_debut         time       (LOCKED — comes from validated plan, cannot be changed)
+ * heure_fin           time       (LOCKED — duration fixed by proposant)
+ * salle               varchar    (EDITABLE by chef after creation)
+ * statut              varchar(30)
+ *                       en_attente → session created from validated plan
+ *                       publie     → chef published the calendar
+ *                       termine    → jury/president submitted evaluation
  * calendrier_publie   boolean default false
  * created_at / updated_at
  *
- * Migration de renommage :
- *   ALTER TABLE jurys_pfe RENAME TO soutenances;
- *   -- puis pour chaque table enfant :
- *   ALTER TABLE jury_membres_pfe RENAME TO soutenance_membres;
- *   ALTER TABLE soutenance_membres RENAME COLUMN jury_id TO soutenance_id;
- *   ALTER TABLE notes_pfe          RENAME COLUMN jury_id TO soutenance_id;
- *   ALTER TABLE resultats_pfe      RENAME COLUMN jury_id TO soutenance_id;
+ * A soutenance row is created ONLY when chef validates a plan (plans_soutenance).
+ * date + heure_debut + heure_fin are locked at that point.
+ * Only salle can be updated after creation.
  */
 class Soutenance extends Model
 {
     protected $table = 'soutenances';
 
     protected $fillable = [
+        'jury_id',
         'projet_id',
         'date_soutenance',
         'heure_debut',
@@ -47,15 +49,20 @@ class Soutenance extends Model
 
     // ── Relations ─────────────────────────────────────────────────
 
+    /**
+     * The jury composition group this session belongs to.
+     */
+    public function jury(): BelongsTo
+    {
+        return $this->belongsTo(JuryMembrePfe::class, 'jury_id');
+    }
+
+    /**
+     * The project (kept for backward compat with notes + resultat).
+     */
     public function projet(): BelongsTo
     {
         return $this->belongsTo(ProjetPfe::class, 'projet_id');
-    }
-
-    public function membres(): HasMany
-    {
-        // Table jury_membres_pfe (nom conservé), colonne jury_id renommée en soutenance_id
-        return $this->hasMany(JuryMembrePfe::class, 'soutenance_id');
     }
 
     public function notes(): HasMany
@@ -68,22 +75,11 @@ class Soutenance extends Model
         return $this->hasOne(ResultatPfe::class, 'soutenance_id');
     }
 
-    /** Plans proposés (par jury ou encadrant) liés à cette soutenance */
-    public function plans(): HasMany
-    {
-        return $this->hasMany(PlanSoutenance::class, 'soutenance_id');
-    }
-
-    // ── Helper : contrôle de salle ────────────────────────────────
+    // ── Salle conflict helper ─────────────────────────────────────
 
     /**
-     * Retourne true si la salle est libre sur le créneau [heureDebut, heureFin).
-     * $excludeId = id de la soutenance en cours de modification (à ignorer).
-     *
-     * Usage dans le contrôleur :
-     *   if (!Soutenance::salleLibre($salle, $date, $debut, $fin, $id)) {
-     *       return response()->json(['message' => 'Salle déjà réservée.'], 422);
-     *   }
+     * Returns true if the salle is free for the given slot.
+     * $excludeId = soutenance id to ignore (for updates).
      */
     public static function salleLibre(
         string $salle,

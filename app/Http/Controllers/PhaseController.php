@@ -4,13 +4,16 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Phase;
+use App\Models\Livrable;
 use App\Models\Notification;
+use App\Models\SuiviEtudiantPhase;
 use App\Models\Utilisateur;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class PhaseController extends Controller
 {
@@ -40,8 +43,13 @@ class PhaseController extends Controller
             return response()->json([]);
         }
 
+        // Return all phases that are active OR already terminated
+        // so the student sees the full progression (terminated ones stay visible)
         $phases = Phase::where('chef_id', $chef->id)
-            ->where('active', true)
+            ->where(function ($q) {
+                $q->where('active', true)
+                  ->orWhere('terminee', true);
+            })
             ->orderBy('ordre')
             ->get();
 
@@ -63,6 +71,7 @@ class PhaseController extends Controller
     {
         $data = $request->validate([
             'nom'                  => 'required|string|max:255',
+            'description'          => 'nullable|string',
             'date_debut'           => 'required|date',
             'date_fin'             => 'required|date|after_or_equal:date_debut',
             'coefficient'          => 'required|numeric|min:0|max:10',
@@ -74,6 +83,7 @@ class PhaseController extends Controller
         $phase = Phase::create([
             'chef_id'              => Auth::id(),
             'nom'                  => $data['nom'],
+            'description'          => $data['description'] ?? null,
             'ordre'                => $maxOrdre + 1,
             'date_debut'           => $data['date_debut'],
             'date_fin'             => $data['date_fin'],
@@ -103,6 +113,7 @@ class PhaseController extends Controller
 
         $data = $request->validate([
             'nom'                  => 'sometimes|string|max:255',
+            'description'          => 'sometimes|nullable|string',
             'date_debut'           => 'sometimes|date',
             'date_fin'             => 'sometimes|date|after_or_equal:date_debut',
             'coefficient'          => 'sometimes|numeric|min:0|max:10',
@@ -141,7 +152,9 @@ class PhaseController extends Controller
                 ->update(['active' => false]);
 
             $phase->update(['active' => true, 'terminee' => false]);
-            $this->notifierActivation($phase);
+            $debut   = \Carbon\Carbon::parse($phase->date_debut)->format('d/m/Y');
+            $fin     = \Carbon\Carbon::parse($phase->date_fin)->format('d/m/Y');
+            $this->notifierPhase($phase, "La phase \"{$phase->nom}\" est maintenant active (du {$debut} au {$fin}).");
 
             return response()->json($phase->fresh());
         }
@@ -154,6 +167,7 @@ class PhaseController extends Controller
             }
 
             $phase->update(['active' => false, 'terminee' => true]);
+            $this->notifierPhase($phase, "La phase \"{$phase->nom}\" a été clôturée par le chef de département.");
             return response()->json($phase->fresh());
         }
 
@@ -214,31 +228,145 @@ class PhaseController extends Controller
         return response()->json(['message' => 'Phase supprimée']);
     }
 
+    /**
+     * POST /api/phases/reinitialiser
+     *
+     * Resets ALL phases of this chef to inactive/non-terminated,
+     * then wipes all livrable files + records and all suivi records
+     * for students of this chef's speciality.
+     * The phases themselves are kept intact (dates, coefficients, names).
+     */
+    public function reinitialiser(): JsonResponse
+    {
+        $chef = Auth::user();
+        if ($chef->role !== 'chef') {
+            return response()->json(['message' => 'Accès refusé.'], 403);
+        }
+
+        DB::transaction(function () use ($chef) {
+
+            // 1. Reset all phases → active=false, terminee=false
+            Phase::where('chef_id', $chef->id)
+                ->update(['active' => false, 'terminee' => false]);
+
+            // 2. Collect all student IDs of this speciality
+            $etudiantIds = Utilisateur::where('role', 'etudiant')
+                ->where('specialite_id', $chef->specialite_id)
+                ->pluck('id');
+
+            // 3. Delete livrable files from disk then wipe the records
+            $livrables = Livrable::whereIn('etudiant_id', $etudiantIds)->get();
+            foreach ($livrables as $lv) {
+                if ($lv->fichier) {
+                    \Illuminate\Support\Facades\Storage::disk('public')->delete($lv->fichier);
+                }
+            }
+            Livrable::whereIn('etudiant_id', $etudiantIds)->delete();
+
+            // 4. Wipe all suivi records for these students
+            $affectationIds = \App\Models\Affectation::whereIn('etudiant_id', $etudiantIds)
+                ->pluck('id');
+            SuiviEtudiantPhase::whereIn('affectation_id', $affectationIds)->delete();
+        });
+
+        return response()->json([
+            'message' => 'Toutes les phases ont été réinitialisées. Les livrables et le suivi ont été effacés.',
+        ]);
+    }
+
+    /**
+     * GET /api/phases/livrable-stats
+     *
+     * Chef only — for each active phase, returns how many students of the
+     * chef's speciality have submitted at least one livrable vs. total students.
+     *
+     * Response shape:
+     * [
+     *   { phase_id, phase_nom, submitted, total, percent, date_fin, jours_restants }
+     * ]
+     */
+    public function livrableStats(): JsonResponse
+    {
+        $chef = Auth::user();
+        if ($chef->role !== 'chef') {
+            return response()->json(['message' => 'Accès refusé.'], 403);
+        }
+
+        // Total students for this speciality
+        $totalEtudiants = Utilisateur::where('role', 'etudiant')
+            ->where('specialite_id', $chef->specialite_id)
+            ->count();
+
+        // Active phases of this chef
+        $activePhases = Phase::where('chef_id', $chef->id)
+            ->where('active', true)
+            ->get();
+
+        $stats = $activePhases->map(function (Phase $phase) use ($totalEtudiants) {
+            // Count distinct students who submitted a livrable for this phase
+            $submitted = Livrable::where('phase_id', $phase->id)
+                ->distinct('etudiant_id')
+                ->count('etudiant_id');
+
+            $joursRestants = $phase->date_fin
+                ? (int) now()->startOfDay()->diffInDays(
+                    \Carbon\Carbon::parse($phase->date_fin)->startOfDay(),
+                    false   // signed: negative = past
+                  )
+                : null;
+
+            return [
+                'phase_id'       => $phase->id,
+                'phase_nom'      => $phase->nom,
+                'submitted'      => $submitted,
+                'total'          => $totalEtudiants,
+                'percent'        => $totalEtudiants > 0
+                    ? round($submitted / $totalEtudiants * 100)
+                    : 0,
+                'date_fin'       => $phase->date_fin,
+                'jours_restants' => $joursRestants,
+            ];
+        });
+
+        return response()->json($stats);
+    }
+
     // ─────────────────────────────────────────────────────────────────
 
-    private function notifierActivation(Phase $phase): void
+    /**
+     * Notify students (by specialite) AND encadrants (via affectations)
+     * when a phase is activated or terminated.
+     */
+    private function notifierPhase(Phase $phase, string $message): void
     {
         try {
             $chef = Utilisateur::find($phase->chef_id);
             if (! $chef) return;
 
-            $destinataires = Utilisateur::where('specialite_id', $chef->specialite_id)
-                ->whereIn('role', ['encadrant', 'etudiant'])
+            // 1. Students of this speciality
+            $etudiantIds = Utilisateur::where('role', 'etudiant')
+                ->where('specialite_id', $chef->specialite_id)
                 ->pluck('id');
 
-            $debut   = \Carbon\Carbon::parse($phase->date_debut)->format('d/m/Y');
-            $fin     = \Carbon\Carbon::parse($phase->date_fin)->format('d/m/Y');
-            $message = "La phase \"" . $phase->nom . "\" est maintenant active (du {$debut} au {$fin}).";
+            // 2. Encadrants linked to those students via affectations
+            $encadrantIds = \App\Models\Affectation::whereIn('etudiant_id', $etudiantIds)
+                ->whereNotNull('encadrant_id')
+                ->pluck('encadrant_id')
+                ->unique();
+
+            $destinataires = $etudiantIds->merge($encadrantIds)->unique();
 
             foreach ($destinataires as $userId) {
                 Notification::create([
                     'user_id'    => $userId,
                     'message'    => $message,
+                    'lu'         => false,
                     'created_at' => now(),
                 ]);
             }
         } catch (\Throwable $e) {
-            Log::warning('PhaseController::notifierActivation: ' . $e->getMessage());
+            Log::warning('PhaseController::notifierPhase: ' . $e->getMessage()
+                . ' | ' . $e->getFile() . ':' . $e->getLine());
         }
     }
 }

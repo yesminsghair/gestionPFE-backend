@@ -38,7 +38,7 @@ class GrilleEvaluationController extends Controller
 
         if ($user->role === 'directeur') {
             $grilles = GrilleEvaluation::with(['categories.criteres', 'chef.specialite'])
-                ->whereIn('statut', ['publie', 'verrouille'])
+                ->whereIn('statut', ['en_attente', 'valide', 'publie', 'verrouille'])
                 ->latest()
                 ->get();
             return response()->json($grilles->map(fn($g) => $this->format($g)));
@@ -47,7 +47,7 @@ class GrilleEvaluationController extends Controller
         if (in_array($user->role, ['encadrant', 'jury'])) {
             // verrouille = validated by directeur = visible to all encadrants & jury members.
             $grilles = GrilleEvaluation::with(['categories.criteres', 'chef.specialite'])
-                ->where('statut', 'verrouille')
+                ->whereIn('statut', ['publie', 'verrouille'])
                 ->latest()
                 ->get();
             return response()->json($grilles->map(fn($g) => $this->format($g)));
@@ -58,7 +58,7 @@ class GrilleEvaluationController extends Controller
         $isJuryMember = \App\Models\JuryMembrePfe::where('enseignant_id', $user->id)->exists();
         if ($isJuryMember) {
             $grilles = GrilleEvaluation::with(['categories.criteres', 'chef.specialite'])
-                ->where('statut', 'verrouille')
+                ->whereIn('statut', ['publie', 'verrouille'])
                 ->latest()
                 ->get();
             return response()->json($grilles->map(fn($g) => $this->format($g)));
@@ -96,7 +96,7 @@ class GrilleEvaluationController extends Controller
      */
     public function update(Request $request, GrilleEvaluation $grille): JsonResponse
     {
-        if (in_array($grille->statut, ['publie', 'verrouille'])) {
+        if (in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable (soumise ou validée).'], 403);
         }
         $data = $request->validate([
@@ -110,7 +110,7 @@ class GrilleEvaluationController extends Controller
     // DELETE /api/grilles/{id}
     public function destroy(GrilleEvaluation $grille): JsonResponse
     {
-        if (in_array($grille->statut, ['publie', 'verrouille'])) {
+        if (in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable, suppression impossible.'], 403);
         }
 
@@ -122,22 +122,24 @@ class GrilleEvaluationController extends Controller
      * POST /api/grilles/{id}/publier
      *
      * Chef submits the grille to the directeur for validation.
-     * Status: brouillon → publie
+     * Status: brouillon → en_attente
      * Action: notify directeur(s) with chef name + speciality.
      */
     public function publier(GrilleEvaluation $grille): JsonResponse
     {
-        if ($grille->statut === 'verrouille') {
-            return response()->json(['message' => 'Déjà validée et verrouillée.'], 422);
+        if (in_array($grille->statut, ['valide', 'publie', 'verrouille'])) {
+            return response()->json(['message' => 'Déjà validée ou publiée.'], 422);
         }
-        if ($grille->statut === 'publie') {
+        if ($grille->statut === 'en_attente') {
             return response()->json(['message' => 'Déjà soumise au directeur.'], 422);
         }
 
-        $grille->update(['statut' => 'publie', 'publie_le' => now()]);
+        $grille->update(['statut' => 'en_attente', 'publie_le' => now(), 'motif_rejet' => null]);
         $this->notifierDirecteur($grille);
 
-        return response()->json($grille->fresh());
+        return response()->json(
+            $this->format($grille->fresh()->load('categories.criteres', 'chef.specialite'))
+        );
     }
 
     /**
@@ -146,16 +148,26 @@ class GrilleEvaluationController extends Controller
      * Directeur rejects a submitted grille → resets to brouillon.
      * The chef receives a notification and can correct and resubmit.
      */
-    public function rejeter(GrilleEvaluation $grille): JsonResponse
+    public function rejeter(Request $request, GrilleEvaluation $grille): JsonResponse
     {
-        if ($grille->statut !== 'publie') {
+        if ($grille->statut !== 'en_attente') {
             return response()->json(['message' => 'Seule une grille soumise peut être rejetée.'], 422);
         }
 
-        $grille->update(['statut' => 'brouillon']);
-        $this->notifierChefRejet($grille);
+        $data = $request->validate([
+            'motif' => 'nullable|string|max:1000',
+        ]);
 
-        return response()->json($grille->fresh());
+        $grille->update([
+            'statut'      => 'brouillon',
+            'motif_rejet' => $data['motif'] ?? null,
+        ]);
+
+        $this->notifierChefRejet($grille, $data['motif'] ?? null);
+
+        return response()->json(
+            $this->format($grille->fresh()->load('categories.criteres', 'chef.specialite'))
+        );
     }
 
     /**
@@ -173,16 +185,18 @@ class GrilleEvaluationController extends Controller
     {
         $user    = Auth::user();
         $isDirecteur = $user->role === 'directeur';
-        $wasPublie   = $grille->statut === 'publie';
+        $wasPublie   = $grille->statut === 'en_attente';
 
-        $grille->update(['statut' => 'verrouille', 'verrouille_le' => now()]);
+        $grille->update(['statut' => 'valide', 'verrouille_le' => now()]);
 
         // Notify the owning chef only when the directeur validates
         if ($isDirecteur && $wasPublie) {
             $this->notifierChefValidation($grille);
         }
 
-        return response()->json($grille->fresh());
+        return response()->json(
+            $this->format($grille->fresh()->load('categories.criteres', 'chef.specialite'))
+        );
     }
 
     // ─── Categories ───────────────────────────────────────────────────
@@ -190,7 +204,7 @@ class GrilleEvaluationController extends Controller
     // POST /api/grilles/{id}/categories
     public function addCategorie(Request $request, GrilleEvaluation $grille): JsonResponse
     {
-        if (in_array($grille->statut, ['publie', 'verrouille'])) {
+        if (in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable.'], 403);
         }
 
@@ -211,7 +225,7 @@ class GrilleEvaluationController extends Controller
     // PUT /api/grilles/{id}/categories/{catId}
     public function updateCategorie(Request $request, GrilleEvaluation $grille, CategorieGrille $categorie): JsonResponse
     {
-        if (in_array($grille->statut, ['publie', 'verrouille'])) {
+        if (in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable.'], 403);
         }
 
@@ -229,7 +243,7 @@ class GrilleEvaluationController extends Controller
     // DELETE /api/grilles/{id}/categories/{catId}
     public function deleteCategorie(GrilleEvaluation $grille, CategorieGrille $categorie): JsonResponse
     {
-        if (in_array($grille->statut, ['publie', 'verrouille'])) {
+        if (in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable.'], 403);
         }
 
@@ -242,7 +256,7 @@ class GrilleEvaluationController extends Controller
     // POST /api/grilles/{id}/categories/{catId}/criteres
     public function addCritere(Request $request, GrilleEvaluation $grille, CategorieGrille $categorie): JsonResponse
     {
-        if (in_array($grille->statut, ['publie', 'verrouille'])) {
+        if (in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
             return response()->json(['message' => 'Grille non modifiable.'], 403);
         }
 
@@ -265,7 +279,7 @@ class GrilleEvaluationController extends Controller
         $grilleId = optional($critere->categorie)->grille_id;
         if ($grilleId) {
             $grille = GrilleEvaluation::find($grilleId);
-            if ($grille && in_array($grille->statut, ['publie', 'verrouille'])) {
+            if ($grille && in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
                 return response()->json(['message' => 'Grille non modifiable.'], 403);
             }
         }
@@ -286,13 +300,75 @@ class GrilleEvaluationController extends Controller
         $grilleId = optional($critere->categorie)->grille_id;
         if ($grilleId) {
             $grille = GrilleEvaluation::find($grilleId);
-            if ($grille && in_array($grille->statut, ['publie', 'verrouille'])) {
+            if ($grille && in_array($grille->statut, ['en_attente', 'valide', 'publie', 'verrouille'])) {
                 return response()->json(['message' => 'Grille non modifiable.'], 403);
             }
         }
 
         $critere->delete();
         return response()->json(['message' => 'Critère supprimé.']);
+    }
+
+    /**
+     * POST /api/grilles/{id}/activer
+     *
+     * Chef activates the directeur-validated grille, making it accessible
+     * to encadrants and/or jury members according to the chosen visibility.
+     * Status: valide → publie
+     */
+    public function activer(GrilleEvaluation $grille): JsonResponse
+    {
+        if ($grille->statut !== 'valide') {
+            return response()->json(['message' => 'Seule une grille validée peut être publiée.'], 422);
+        }
+
+        $grille->update(['statut' => 'publie']);
+
+        return response()->json(
+            $this->format($grille->fresh()->load('categories.criteres', 'chef.specialite'))
+        );
+    }
+
+    /**
+     * POST /api/grilles/{id}/fermer
+     *
+     * Chef permanently locks an active grille.
+     * Status: publie → verrouille
+     */
+    public function fermer(GrilleEvaluation $grille): JsonResponse
+    {
+        if ($grille->statut !== 'publie') {
+            return response()->json(['message' => 'Seule une grille publiée peut être verrouillée.'], 422);
+        }
+
+        $grille->update(['statut' => 'verrouille', 'verrouille_le' => now()]);
+
+        return response()->json(
+            $this->format($grille->fresh()->load('categories.criteres', 'chef.specialite'))
+        );
+    }
+
+    /**
+     * POST /api/grilles/{id}/reinitialiser
+     *
+     * Chef resets any grille back to brouillon so it can be edited again.
+     */
+    public function reinitialiser(GrilleEvaluation $grille): JsonResponse
+    {
+        if ($grille->statut === 'brouillon') {
+            return response()->json(['message' => 'La grille est déjà en brouillon.'], 422);
+        }
+
+        $grille->update([
+            'statut'        => 'brouillon',
+            'publie_le'     => null,
+            'verrouille_le' => null,
+            'motif_rejet'   => null,
+        ]);
+
+        return response()->json(
+            $this->format($grille->fresh()->load('categories.criteres', 'chef.specialite'))
+        );
     }
 
     // ─── Private helpers ──────────────────────────────────────────────
@@ -320,9 +396,8 @@ class GrilleEvaluationController extends Controller
             Utilisateur::where('role', 'directeur')
                 ->pluck('id')
                 ->each(fn($id) => Notification::create([
-                    'user_id'    => $id,
-                    'message'    => $message,
-                    'created_at' => now(),
+                    'user_id' => $id,
+                    'message' => $message,
                 ]));
         } catch (\Throwable $e) {
             Log::warning('GrilleEvaluationController::notifierDirecteur: ' . $e->getMessage());
@@ -334,9 +409,8 @@ class GrilleEvaluationController extends Controller
     {
         try {
             Notification::create([
-                'user_id'    => $grille->chef_id,
-                'message'    => "Votre grille d'évaluation a été validée par le directeur de stage.",
-                'created_at' => now(),
+                'user_id' => $grille->chef_id,
+                'message' => "Votre grille d'évaluation a été validée par le directeur de stage.",
             ]);
         } catch (\Throwable $e) {
             Log::warning('GrilleEvaluationController::notifierChefValidation: ' . $e->getMessage());
@@ -344,14 +418,17 @@ class GrilleEvaluationController extends Controller
     }
 
     /** Notify the chef that the directeur rejected his grille. */
-    private function notifierChefRejet(GrilleEvaluation $grille): void
+    private function notifierChefRejet(GrilleEvaluation $grille, ?string $motif = null): void
     {
         try {
+            $message = "Votre grille d'évaluation a été rejetée par le directeur de stage. Vous pouvez la corriger et la resoumettre.";
+            if ($motif) {
+                $message .= " Motif : " . $motif;
+            }
             Notification::create([
                 'user_id'    => $grille->chef_id,
-                'message'    => "Votre grille d'évaluation a été rejetée par le directeur de stage. Vous pouvez la corriger et la resoumettre.",
-                'created_at' => now(),
-            ]);
+                'message'    => $message,
+                ]);
         } catch (\Throwable $e) {
             Log::warning('GrilleEvaluationController::notifierChefRejet: ' . $e->getMessage());
         }

@@ -9,18 +9,30 @@ class Notification extends Model
 {
     protected $table = 'notifications';
 
-    public $timestamps = false;
+    public $timestamps = false;  // la table n'a pas de updated_at
+
+    const CREATED_AT = 'created_at'; // Laravel remplit created_at automatiquement
+    const UPDATED_AT = null;          // pas de updated_at
 
     protected $fillable = [
         'user_id',
         'message',
         'lu',
-        'created_at',
     ];
 
     protected $casts = [
-        'lu' => 'boolean',
+        'lu'         => 'boolean',
+        'created_at' => 'datetime',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(function ($notification) {
+            if (empty($notification->created_at)) {
+                $notification->created_at = now();
+            }
+        });
+    }
 
     public function user(): BelongsTo
     {

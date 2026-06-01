@@ -99,6 +99,11 @@ class Utilisateur extends Authenticatable
         return $this->hasMany(Livrable::class, 'etudiant_id');
     }
 
+    public function projetPfe(): HasOne
+    {
+        return $this->hasOne(ProjetPfe::class, 'etudiant_id');
+    }
+
     // ── Accesseurs pratiques ───────────────────────────────────────
 
     public function getStatusAttribute(): ?string

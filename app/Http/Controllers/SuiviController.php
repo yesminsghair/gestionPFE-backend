@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Affectation;
 use App\Models\Notification;
 use App\Models\Phase;
+use App\Models\ProjetPfe;
 use App\Models\SuiviEtudiantPhase;
 use App\Models\Utilisateur;
 use Illuminate\Http\JsonResponse;
@@ -37,6 +38,7 @@ class SuiviController extends Controller
 
             $affectations = Affectation::with([
                 'etudiant',
+                'etudiant.projetPfe',
                 'suiviPhases.phase',
             ])->where('encadrant_id', $encadrantId)->get();
 
@@ -92,8 +94,10 @@ class SuiviController extends Controller
                 $total    = $phases->count();
                 $progress = $total ? round($validees / $total * 100) : 0;
 
-                // Current phase = the one that is en_cours
-                $enCours = $phasesData->firstWhere('statut', 'en_cours');
+                // Current phase = suivi en_cours first, then any active phase, then first non-terminee
+                $enCours = $phasesData->firstWhere('statut', 'en_cours')
+                    ?? $phasesData->first(fn($p) => $p['active'] && !$p['terminee'])
+                    ?? $phasesData->first(fn($p) => !$p['terminee']);
 
                 return [
                     'id'           => $aff->id,
@@ -102,11 +106,15 @@ class SuiviController extends Controller
                         (optional($aff->etudiant)->nom    ?? '') . ' ' .
                         (optional($aff->etudiant)->prenom ?? '')
                     ),
-                    'sujet'        => $aff->titre_projet,
+                    'email'        => optional($aff->etudiant)->email ?? null,
+                    'matricule'    => optional($aff->etudiant)->matricule ?? null,
+                    'sujet'        => optional($aff->etudiant->projetPfe)->titre
+                                      ?? $aff->titre_projet
+                                      ?? null,
                     'phases'       => $phasesData,
                     'progress'     => $progress,
                     'phaseActuelle'=> $enCours ? $enCours['nom'] : '—',
-                    'phaseActive'  => (bool) $enCours,
+                    'phaseActive'  => (bool) ($phasesData->firstWhere('statut', 'en_cours') ?? $phasesData->first(fn($p) => $p['active'] && !$p['terminee'])),
                     'termineTotal' => $progress === 100,
                 ];
             });
@@ -312,12 +320,23 @@ class SuiviController extends Controller
             $affectation = Affectation::with('suiviPhases.phase')
                 ->findOrFail($affectationId);
 
+            // Load livrables for this student, keyed by phase_id
+            $livrables = \App\Models\Livrable::where('etudiant_id', $affectation->etudiant_id)
+                ->orderByDesc('depose_le')
+                ->get()
+                ->groupBy('phase_id');
+
             $historique = $affectation->suiviPhases
                 ->sortBy(fn($s) => optional($s->phase)->ordre)
-                ->map(function ($s) {
+                ->map(function ($s) use ($livrables) {
+                    $phaseId = optional($s->phase)->id;
+                    $phaseLvs = $phaseId ? ($livrables[$phaseId] ?? collect()) : collect();
+
                     return [
                         'id'          => $s->id,
+                        'phase_id'    => $phaseId,
                         'phase'       => optional($s->phase)->nom ?? '—',
+                        'ordre'       => optional($s->phase)->ordre ?? 0,
                         'statut'      => $s->statut,
                         'commentaire' => $s->commentaire_encadrant,
                         'date'        => $s->date_validation
@@ -325,6 +344,14 @@ class SuiviController extends Controller
                             : ($s->date_lancement
                                 ? \Carbon\Carbon::parse($s->date_lancement)->format('d/m/Y')
                                 : '—'),
+                        'livrables'   => $phaseLvs->map(fn($l) => [
+                            'id'          => $l->id,
+                            'file_name'   => $l->file_name ?: ($l->fichier ? basename($l->fichier) : 'fichier.pdf'),
+                            'fichier_url' => $l->fichier ? asset('storage/' . $l->fichier) : null,
+                            'statut'      => $l->statut,
+                            'version'     => $l->version ?? 1,
+                            'depose_le'   => $l->depose_le,
+                        ])->values(),
                     ];
                 })
                 ->values();

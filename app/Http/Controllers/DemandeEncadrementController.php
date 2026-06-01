@@ -7,6 +7,7 @@ use App\Models\DemandeEncadrement;
 use App\Models\Utilisateur;
 use App\Models\Affectation;
 use App\Models\Notification;
+use App\Models\ProjetPfe;
 
 class DemandeEncadrementController extends Controller
 {
@@ -225,18 +226,41 @@ class DemandeEncadrementController extends Controller
     // ── POST /api/demandes-encadrement/{id}/accepter ──────────────
     public function accepter(Request $request, string $id)
     {
-        $demande = DemandeEncadrement::findOrFail($id);
+        $demande = DemandeEncadrement::with(['etudiant.specialite', 'encadrant'])->findOrFail($id);
 
         if ($demande->encadrant_id !== $request->user()->id) {
             return response()->json(['message' => 'Non autorisé.'], 403);
         }
 
         $demande->update([
-            'statut'     => 'acceptee',
-            'traite_at'  => now(),
+            'statut'    => 'acceptee',
+            'traite_at' => now(),
         ]);
 
-        // Notifier l'étudiant
+        // ── 1. Créer / mettre à jour le ProjetPfe ────────────────
+        $specialiteNom = optional($demande->etudiant?->specialite)->nom ?? null;
+
+        $projet = ProjetPfe::updateOrCreate(
+            ['etudiant_id' => $demande->etudiant_id],
+            [
+                'encadrant_id' => $demande->encadrant_id,
+                'titre'        => $demande->sujet,
+                'description'  => $demande->description ?? '',
+                'specialite'   => $specialiteNom,
+            ]
+        );
+
+        // ── 2. Créer / mettre à jour l'Affectation ───────────────
+        Affectation::updateOrCreate(
+            ['etudiant_id' => $demande->etudiant_id],
+            [
+                'encadrant_id'  => $demande->encadrant_id,
+                'titre_projet'  => $demande->sujet,
+                'description'   => $demande->description ?? '',
+            ]
+        );
+
+        // ── 3. Notifier l'étudiant ────────────────────────────────
         Notification::create([
             'user_id' => $demande->etudiant_id,
             'titre'   => 'Demande d\'encadrement acceptée',
@@ -248,6 +272,7 @@ class DemandeEncadrementController extends Controller
         return response()->json([
             'message' => 'Demande acceptée.',
             'demande' => $this->format($demande->load(['encadrant', 'etudiant'])),
+            'projet'  => $projet->id,
         ]);
     }
 

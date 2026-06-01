@@ -1,58 +1,68 @@
 <?php
+
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
- * plans_soutenance
+ * plans_soutenance — proposed defence slot by a jury member
  * ─────────────────────────────────────────────────────────
  * id               bigint PK
- * proposant_id     FK → utilisateurs.id
- * role             enum('jury','encadrant')
- * statut           enum('en_attente','approuve','rejete')
- * soutenance_id    FK → soutenances.id  (nullable — lié à une soutenance existante)
+ * jury_id          FK → jury_membres_pfe.id  (which jury group this concerns)
+ * proposant_id     FK → utilisateurs.id       (who proposed)
+ * fonction         varchar(30)               (what is their role: encadrant|president|examinateur)
  * date             date
  * heure_debut      time
+ * heure_fin        time                       (fixes the durée — locked if plan validated)
  * salle            varchar(100)
+ * statut           enum: en_attente | approuve | rejete
+ * motif_rejet      text nullable
+ * date_traitement  timestamp nullable         (when chef validated or rejected)
  * created_at / updated_at
- * ─────────────────────────────────────────────────────────
- * NB : la table creneaux_plan est supprimée.
- *      Chaque ligne plans_soutenance = un créneau proposé,
- *      éventuellement rattaché à une soutenance déjà créée.
+ *
+ * Lifecycle:
+ *   en_attente → member submitted, waiting for chef
+ *   approuve   → chef validated → triggers soutenance row creation
+ *   rejete     → chef rejected  → member can delete and re-propose
  */
 class PlanSoutenance extends Model
 {
     protected $table = 'plans_soutenance';
 
     protected $fillable = [
+        'jury_id',
         'proposant_id',
-        'role',
+        'fonction',
         'statut',
-        'soutenance_id',
         'date',
         'heure_debut',
+        'heure_fin',
         'salle',
+        'motif_rejet',
+        'date_traitement',
     ];
 
     protected $casts = [
-        'date' => 'date:Y-m-d',
+        'date'            => 'date:Y-m-d',
+        'date_traitement' => 'datetime',
     ];
 
-    // ── Relations ────────────────────────────────────────────────────────────
+    // ── Relations ────────────────────────────────────────────────
 
-    /** L'enseignant (jury ou encadrant) qui propose ce créneau */
-    public function proposant(): BelongsTo
+    /**
+     * The jury composition group this plan concerns.
+     */
+    public function jury(): BelongsTo
     {
-        return $this->belongsTo(Utilisateur::class, 'proposant_id');
+        return $this->belongsTo(JuryMembrePfe::class, 'jury_id');
     }
 
     /**
-     * La soutenance à laquelle ce plan est rattaché (nullable).
-     * NULL = le chef n'a pas encore créé/associé la soutenance correspondante.
+     * The member (encadrant, president, or examinateur) who proposed this slot.
      */
-    public function soutenance(): BelongsTo
+    public function proposant(): BelongsTo
     {
-        return $this->belongsTo(Soutenance::class, 'soutenance_id');
+        return $this->belongsTo(Utilisateur::class, 'proposant_id');
     }
 }

@@ -17,6 +17,7 @@ class GrilleEvaluation extends Model
         'visibilite',
         'publie_le',
         'verrouille_le',
+        'motif_rejet',
     ];
 
     protected $casts = [
