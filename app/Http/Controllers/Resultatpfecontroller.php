@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Notification;
 use App\Models\ResultatPfe;
 use App\Models\Utilisateur;
 use Illuminate\Http\JsonResponse;
@@ -77,6 +78,12 @@ class ResultatPfeController extends Controller
 
     /**
      * POST /api/resultats-pfe/{id}/decision
+     *
+     * Allows the chef to override the automatic decision (admis / ajourne)
+     * on a result that has NOT yet been published.
+     * This is used both from:
+     *  - The card actions (Ajourner / Réadmettre buttons on existing results)
+     *  - The deliberation panel (when chef selects Ajourné before clicking Délibérer)
      */
     public function decision(int $id, Request $request): JsonResponse
     {
@@ -104,16 +111,43 @@ class ResultatPfeController extends Controller
 
     /**
      * POST /api/resultats-pfe/{id}/publier
+     *
+     * Publishes a single result and sends notifications to the student + encadrant.
      */
     public function publier(int $id): JsonResponse
     {
-        $resultat = ResultatPfe::findOrFail($id);
+        $resultat = ResultatPfe::with(
+            'etudiant',
+            'soutenance.projet.etudiant',
+            'soutenance.projet.encadrant'
+        )->findOrFail($id);
 
         if ($resultat->publie) {
             return response()->json(['message' => 'Résultat déjà publié.'], 422);
         }
 
         $resultat->update(['publie' => true, 'publie_le' => now()]);
+
+        // ── Notify student ──────────────────────────────────────────────
+        $etudiantId  = $resultat->soutenance?->projet?->etudiant_id ?? $resultat->etudiant_id;
+        $encadrantId = $resultat->soutenance?->projet?->encadrant_id;
+        $etudiant    = $resultat->soutenance?->projet?->etudiant ?? $resultat->etudiant;
+        $nom         = trim(($etudiant?->prenom ?? '') . ' ' . ($etudiant?->nom ?? ''));
+
+        if ($etudiantId) {
+            Notification::create([
+                'user_id' => $etudiantId,
+                'message' => 'Vos résultats de soutenance PFE sont disponibles. Connectez-vous pour les consulter.',
+            ]);
+        }
+
+        // ── Notify encadrant ────────────────────────────────────────────
+        if ($encadrantId) {
+            Notification::create([
+                'user_id' => $encadrantId,
+                'message' => "Les résultats PFE de votre étudiant {$nom} ont été publiés.",
+            ]);
+        }
 
         return response()->json(['message' => 'Résultat publié avec succès.']);
     }
@@ -166,6 +200,9 @@ class ResultatPfeController extends Controller
 
     /**
      * POST /api/resultats-pfe/publier-tous
+     *
+     * Publishes all unpublished results in the chef's department
+     * and notifies each student + encadrant individually.
      */
     public function publierTous(): JsonResponse
     {
@@ -178,13 +215,41 @@ class ResultatPfeController extends Controller
             );
         }
 
-        $count = $query->count();
+        // Load relations BEFORE the update so we can send notifications
+        $resultats = $query->with([
+            'etudiant',
+            'soutenance.projet.etudiant',
+            'soutenance.projet.encadrant',
+        ])->get();
+
+        $count = $resultats->count();
 
         if ($count === 0) {
             return response()->json(['message' => 'Aucun résultat à publier.'], 422);
         }
 
-        $query->update(['publie' => true, 'publie_le' => now()]);
+        foreach ($resultats as $r) {
+            $r->update(['publie' => true, 'publie_le' => now()]);
+
+            $etudiantId  = $r->soutenance?->projet?->etudiant_id ?? $r->etudiant_id;
+            $encadrantId = $r->soutenance?->projet?->encadrant_id;
+            $etudiant    = $r->soutenance?->projet?->etudiant ?? $r->etudiant;
+            $nom         = trim(($etudiant?->prenom ?? '') . ' ' . ($etudiant?->nom ?? ''));
+
+            if ($etudiantId) {
+                Notification::create([
+                    'user_id' => $etudiantId,
+                    'message' => 'Vos résultats de soutenance PFE sont disponibles. Connectez-vous pour les consulter.',
+                ]);
+            }
+
+            if ($encadrantId) {
+                Notification::create([
+                    'user_id' => $encadrantId,
+                    'message' => "Les résultats PFE de votre étudiant {$nom} ont été publiés.",
+                ]);
+            }
+        }
 
         return response()->json(['message' => "{$count} résultat(s) publié(s) avec succès."]);
     }
@@ -222,6 +287,9 @@ class ResultatPfeController extends Controller
      * Canonical row shape for ConsulterResultatFinal.vue.
      * Uses the direct etudiant relation so data always appears even when
      * the soutenance → projet chain has nulls.
+     *
+     * Also exposes soutenance_id so the Vue deliberer() method can match
+     * a newly-created result back to its pending jury card.
      */
     private function formatResultat(ResultatPfe $r): array
     {
@@ -245,6 +313,7 @@ class ResultatPfeController extends Controller
 
         return [
             'id'             => $r->id,
+            'soutenance_id'  => $r->soutenance_id,          // ← needed for deliber match in Vue
             'etudiant_id'    => $r->etudiant_id,
             'etudiant_nom'   => trim(($etudiant?->prenom ?? '') . ' ' . ($etudiant?->nom ?? '')),
             'matricule'      => $etudiant?->matricule ?? '—',
@@ -256,7 +325,7 @@ class ResultatPfeController extends Controller
             'note_encadrant' => $noteEncadrant,
             'note_finale'    => $r->note_finale,
             'mention'        => $r->mention,
-            'decision'       => $r->decision,
+            'decision'       => $r->decision,               // 'admis' | 'ajourne'
             'publie'         => (bool) $r->publie,
             'publie_le'      => optional($r->publie_le)->format('d/m/Y'),
             'en_biblio'      => (bool) $r->en_biblio,

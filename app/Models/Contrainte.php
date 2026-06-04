@@ -9,7 +9,6 @@ class Contrainte extends Model
     protected $table = 'contraintes';
 
     protected $fillable = [
-        'affectation_id',
         'chef_id',
         'type',
         'encadrant_id',
@@ -23,9 +22,4 @@ class Contrainte extends Model
         'etudiant_id'  => 'integer',
         'cap'          => 'integer',
     ];
-
-    public function affectation()
-    {
-        return $this->belongsTo(Affectation::class, 'affectation_id');
-    }
 }

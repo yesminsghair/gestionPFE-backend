@@ -462,7 +462,7 @@ public function diffuser(Request $request)
         $request->validate([
             'contraintes'                => 'present|array',
             'contraintes.*.type'         => 'required|string|in:exclure_encadrant,exclure_paire,forcer_paire,cap_override',
-            'contraintes.*.encadrant_id' => 'required|integer|exists:utilisateurs,id',
+            'contraintes.*.encadrant_id' => 'nullable|integer|exists:utilisateurs,id',
             'contraintes.*.etudiant_id'  => 'nullable|integer|exists:utilisateurs,id',
             'contraintes.*.cap'          => 'nullable|integer|min:0|max:99',
             'contraintes.*.raison'       => 'nullable|string|max:255',
@@ -478,12 +478,12 @@ public function diffuser(Request $request)
 
             foreach ($request->contraintes as $row) {
                 \App\Models\Contrainte::create([
-                    'chef_id'      => $chefId,
-                    'type'         => $row['type'],
-                    'encadrant_id' => $row['encadrant_id'],
-                    'etudiant_id'  => $row['etudiant_id'] ?? null,
-                    'cap'          => $row['cap'] ?? null,
-                    'raison'       => $row['raison'] ?? null,
+                    'chef_id'        => $chefId,
+                    'type'           => $row['type'],
+                    'encadrant_id'   => $row['encadrant_id'] ?? null,
+                    'etudiant_id'    => $row['etudiant_id']  ?? null,
+                    'cap'            => $row['cap']          ?? null,
+                    'raison'         => $row['raison']       ?? null,
                 ]);
             }
 

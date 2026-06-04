@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\JuryMembrePfe;
 use App\Models\NotePfe;
 use App\Models\Notification;
 use App\Models\ResultatPfe;
@@ -20,16 +21,19 @@ use Illuminate\Support\Facades\Log;
  * fiches d'évaluation, and student/encadrant result views.
  *
  * Routes:
- *   GET  /api/jurys-pfe/mes-notes                  → mesNotes
- *   GET  /api/jurys-pfe/prets-a-deliberer           → pretsADeliberer
- *   GET  /api/fiches-evaluation                     → fichesEvaluation
- *   GET  /api/jurys-pfe/{juryPfe}/notes             → getNotes
- *   POST /api/jurys-pfe/{juryPfe}/notes             → saveNote
- *   GET  /api/jurys-pfe/{juryPfe}/ma-note           → maNoteDetail
- *   POST /api/jurys-pfe/{juryPfe}/deliberer         → deliberer
- *   POST /api/jurys-pfe/{juryPfe}/publier           → publier (single result)
- *   POST /api/resultats-pfe/publier-tous            → publierTous
- *   GET  /api/deliberation-pfe/mon-resultat         → monResultat
+ *   GET  /api/jurys-pfe/mes-notes                          → mesNotes
+ *   GET  /api/jurys-pfe/prets-a-deliberer                  → pretsADeliberer
+ *   GET  /api/fiches-evaluation                            → fichesEvaluation
+ *   GET  /api/jurys-pfe/{juryPfe}/notes                    → getNotes
+ *   POST /api/jurys-pfe/{juryPfe}/notes                    → saveNote
+ *   GET  /api/jurys-pfe/{juryPfe}/ma-note                  → maNoteDetail
+ *   GET  /api/jurys-pfe/{juryPfe}/evaluation-recue         → evaluationRecue
+ *   POST /api/jurys-pfe/{juryPfe}/deliberer                → deliberer
+ *   POST /api/jurys-pfe/{juryPfe}/publier                  → publier (single result via jury)
+ *   GET  /api/deliberation-pfe/mon-resultat                → monResultat
+ *
+ * NOTE: POST /api/resultats-pfe/publier-tous is now handled exclusively
+ *       by ResultatPfeController::publierTous() (with notifications).
  *
  * Evaluation access rules
  * ───────────────────────
@@ -38,6 +42,13 @@ use Illuminate\Support\Facades\Log;
  *  • A soutenance must be in statut = 'publie' AND its scheduled
  *    date+time (date_soutenance + heure_debut) must have already passed
  *    before any evaluation can be saved.
+ *
+ * Deliberation decision logic
+ * ────────────────────────────
+ *  • The automatic decision is computed from note_finale: ≥10 → admis, <10 → ajourne.
+ *  • The chef may override this via an optional `decision` field in the POST body,
+ *    allowing deliberation with Ajourné even when note ≥ 10 (disciplinary, etc.).
+ *  • Once published, the decision is locked and cannot be changed.
  */
 class EvaluationPfeController extends Controller
 {
@@ -132,16 +143,92 @@ class EvaluationPfeController extends Controller
     }
 
     /**
+     * GET /api/jurys-pfe/{juryPfe}/evaluation-recue
+     *
+     * Returns the président's submitted evaluation to an encadrant or examinateur
+     * who belongs to the same jury, respecting the grille visibility setting.
+     *
+     * Visibility (grille.visibilite):
+     *   'encadrant_jury' → full grille (categories + critères + commentaire + note)
+     *   'jury_only'      → note finale only (no grille breakdown, no commentaire)
+     *
+     * Returns 403 if the authenticated user is not encadrant/examinateur of this jury.
+     * Returns null (200) if the président has not yet submitted an evaluation.
+     */
+    public function evaluationRecue(Soutenance $juryPfe): JsonResponse
+    {
+        $userId = Auth::id();
+
+        // ── 1. Resolve the caller's role in this jury ──────────────────────
+        $juryPfe->loadMissing(['projet.etudiant']);
+
+        $juryComposition = JuryMembrePfe::where('projet_id', $juryPfe->projet_id)->first();
+
+        if (!$juryComposition) {
+            return response()->json(['message' => 'Composition de jury introuvable.'], 403);
+        }
+
+        $fonction = match (true) {
+            (int) $juryComposition->encadrant_id   === (int) $userId => 'encadrant',
+            (int) $juryComposition->examinateur_id === (int) $userId => 'examinateur',
+            (int) $juryComposition->president_id   === (int) $userId => 'president',
+            default                                                    => null,
+        };
+
+        if (!$fonction || $fonction === 'president') {
+            return response()->json(['message' => 'Accès réservé aux membres encadrant/examinateur.'], 403);
+        }
+
+        // ── 2. Find the président's finalised note ─────────────────────────
+        $presidentId = $juryComposition->president_id;
+
+        $notePresident = NotePfe::where('soutenance_id', $juryPfe->id)
+            ->where('enseignant_id', $presidentId)
+            ->finalise()
+            ->first();
+
+        if (!$notePresident) {
+            return response()->json(null);
+        }
+
+        // ── 3. Determine visibility from the active grille ─────────────────
+        $specialiteId = $juryPfe->projet?->etudiant?->specialite_id
+            ?? $juryPfe->projet?->specialite_id
+            ?? null;
+
+        $visibilite = $this->resolveGrilleVisibilite($specialiteId);
+
+        $noteVal = $notePresident->note !== null ? (float) $notePresident->note : null;
+
+        // ── 4. Build response according to visibility ──────────────────────
+        if ($visibilite === 'encadrant_jury') {
+            $categories = $this->loadCategories($notePresident->id);
+
+            return response()->json([
+                'visibilite'  => 'encadrant_jury',
+                'note'        => $noteVal,
+                'commentaire' => $notePresident->commentaire,
+                'finalise'    => (bool) $notePresident->finalise,
+                'soumis_le'   => $notePresident->updated_at?->format('d/m/Y H:i'),
+                'categories'  => $categories,
+            ]);
+        }
+
+        return response()->json([
+            'visibilite'  => 'jury_only',
+            'note'        => $noteVal,
+            'commentaire' => null,
+            'finalise'    => (bool) $notePresident->finalise,
+            'soumis_le'   => $notePresident->updated_at?->format('d/m/Y H:i'),
+            'categories'  => [],
+        ]);
+    }
+
+    /**
      * POST /api/jurys-pfe/{juryPfe}/notes
      *
      * Submit or update a note (président only).
      * Optionally includes per-critère detail rows.
-     *
-     * Guards:
-     *  1. The requesting enseignant must be the **président** of the jury.
-     *  2. The soutenance statut must be 'publie'.
-     *  3. The scheduled date+time (date_soutenance + heure_debut) must be
-     *     in the past (i.e. the defence session has started / elapsed).
      */
     public function saveNote(Request $request, Soutenance $juryPfe): JsonResponse
     {
@@ -155,30 +242,36 @@ class EvaluationPfeController extends Controller
             'criteres.*.note'       => 'required|numeric|min:0',
         ]);
 
-        // ── Guard 1 : must be membre of this jury ──────────────────
-        $membre = $juryPfe->membres()
-            ->where('enseignant_id', $data['enseignant_id'])
-            ->first();
+        $juryComposition = JuryMembrePfe::where('projet_id', $juryPfe->projet_id)->first();
 
-        if (!$membre) {
+        if (!$juryComposition) {
+            return response()->json(['message' => "Aucune composition de jury trouvée pour cette soutenance."], 403);
+        }
+
+        $enseignantId = $data['enseignant_id'];
+        $fonction = match (true) {
+            $juryComposition->president_id   === $enseignantId => 'president',
+            $juryComposition->encadrant_id   === $enseignantId => 'encadrant',
+            $juryComposition->examinateur_id === $enseignantId => 'examinateur',
+            default                                             => null,
+        };
+
+        if (!$fonction) {
             return response()->json(['message' => "Cet enseignant n'est pas membre de ce jury."], 403);
         }
 
-        // ── Guard 2 : only the président may evaluate ──────────────
-        if ($membre->fonction !== 'president') {
+        if ($fonction !== 'president') {
             return response()->json([
                 'message' => "Seul le président du jury peut soumettre une évaluation.",
             ], 403);
         }
 
-        // ── Guard 3 : soutenance must be published ─────────────────
         if ($juryPfe->statut !== 'publie') {
             return response()->json([
                 'message' => "Cette soutenance n'est pas encore publiée et ne peut pas encore être évaluée.",
             ], 422);
         }
 
-        // ── Guard 4 : soutenance must have ended (heure_fin passed) ──
         if (!$this->soutenanceHasEnded($juryPfe)) {
             return response()->json([
                 'message' => "L'évaluation ne peut être soumise qu'après la fin de la soutenance.",
@@ -210,6 +303,9 @@ class EvaluationPfeController extends Controller
             }
 
             DB::commit();
+
+            $this->notifierEvaluation($juryPfe, $note->wasRecentlyCreated);
+
             return response()->json($note);
         } catch (\Throwable $e) {
             DB::rollBack();
@@ -222,7 +318,7 @@ class EvaluationPfeController extends Controller
 
     /**
      * GET /api/fiches-evaluation
-     * All jurys in the chef's department with per-member notes and per-critère breakdown.
+     * All jury compositions in the chef's department with per-member notes.
      */
     public function fichesEvaluation(): JsonResponse
     {
@@ -232,30 +328,41 @@ class EvaluationPfeController extends Controller
             return response()->json([]);
         }
 
-        $jurys = Soutenance::with([
+        $compositions = JuryMembrePfe::with([
             'projet.etudiant',
-            'projet.encadrant',
-            'membres.enseignant',
-            'notes',
-            'resultat',
+            'encadrant',
+            'president',
+            'examinateur',
+            'soutenance.notes.enseignant',
+            'soutenance.resultat',
         ])
-        ->whereHas('projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
+        ->where('publie', true)
+        ->whereHas('projet.etudiant', fn($q) =>
+            $q->where('specialite_id', $chef->specialite_id)
+        )
         ->get();
 
-        $result = $jurys->map(function ($jury) {
-            $presidentMembre = $jury->membres->firstWhere('fonction', 'president');
-            $presidentEns    = $presidentMembre?->enseignant;
+        $result = $compositions->map(function (JuryMembrePfe $jury) {
+            $soutenance = $jury->soutenance;
+            $notes      = $soutenance?->notes ?? collect();
 
-            $fiches = $jury->notes->map(function ($note) use ($jury) {
-                $membre     = $jury->membres->firstWhere('enseignant_id', $note->enseignant_id);
-                $ens        = $membre?->enseignant ?? $note->enseignant;
+            $fiches = $notes->map(function ($note) use ($jury) {
+                $uid      = (int) $note->enseignant_id;
+                $fonction = match (true) {
+                    $uid === (int) $jury->president_id   => 'president',
+                    $uid === (int) $jury->encadrant_id   => 'encadrant',
+                    $uid === (int) $jury->examinateur_id => 'examinateur',
+                    default                              => 'inconnu',
+                };
+
+                $ens        = $note->enseignant;
                 $categories = $this->loadCategories($note->id);
 
                 return [
                     'id'              => $note->id,
                     'membre_id'       => $note->enseignant_id,
                     'membre_nom'      => $ens ? trim($ens->prenom . ' ' . $ens->nom) : '--',
-                    'fonction'        => $membre?->fonction,
+                    'fonction'        => $fonction,
                     'note_totale'     => $note->note,
                     'commentaire'     => $note->commentaire,
                     'finalise'        => (bool) $note->finalise,
@@ -264,26 +371,29 @@ class EvaluationPfeController extends Controller
                 ];
             })->values();
 
+            $resultat = $soutenance?->resultat;
+
             return [
                 'jury_id'         => $jury->id,
+                'soutenance_id'   => $soutenance?->id,
                 'etudiant_nom'    => trim(($jury->projet?->etudiant?->prenom ?? '') . ' ' . ($jury->projet?->etudiant?->nom ?? '')),
                 'matricule'       => $jury->projet?->etudiant?->matricule ?? '--',
                 'projet_titre'    => $jury->projet?->titre ?? 'Sans titre',
-                'encadrant_nom'   => $jury->projet?->encadrant
-                    ? trim(($jury->projet->encadrant->prenom ?? '') . ' ' . ($jury->projet->encadrant->nom ?? ''))
+                'encadrant_nom'   => $jury->encadrant
+                    ? trim(($jury->encadrant->prenom ?? '') . ' ' . ($jury->encadrant->nom ?? ''))
                     : '--',
-                'president_nom'   => $presidentEns
-                    ? trim($presidentEns->prenom . ' ' . $presidentEns->nom)
+                'president_nom'   => $jury->president
+                    ? trim(($jury->president->prenom ?? '') . ' ' . ($jury->president->nom ?? ''))
                     : null,
-                'president_id'    => $presidentMembre?->enseignant_id,
-                'date_soutenance' => $jury->date_soutenance,
-                'heure_debut'     => $jury->heure_debut ? substr($jury->heure_debut, 0, 5) : null,
-                'salle'           => $jury->salle,
-                'resultat'        => $jury->resultat ? [
-                    'note_finale' => $jury->resultat->note_finale,
-                    'mention'     => $jury->resultat->mention,
-                    'decision'    => $jury->resultat->decision,
-                    'publie'      => (bool) $jury->resultat->publie,
+                'president_id'    => $jury->president_id,
+                'date_soutenance' => $soutenance?->date_soutenance,
+                'heure_debut'     => $soutenance?->heure_debut ? substr($soutenance->heure_debut, 0, 5) : null,
+                'salle'           => $soutenance?->salle,
+                'resultat'        => $resultat ? [
+                    'note_finale' => $resultat->note_finale,
+                    'mention'     => $resultat->mention,
+                    'decision'    => $resultat->decision,
+                    'publie'      => (bool) $resultat->publie,
                 ] : null,
                 'fiches'          => $fiches,
             ];
@@ -296,7 +406,9 @@ class EvaluationPfeController extends Controller
 
     /**
      * GET /api/jurys-pfe/prets-a-deliberer
+     *
      * Jurys whose président has submitted a finalised note but have no ResultatPfe yet.
+     * Returned to ConsulterResultatFinal.vue to populate the pending deliberation section.
      */
     public function pretsADeliberer(): JsonResponse
     {
@@ -306,51 +418,78 @@ class EvaluationPfeController extends Controller
             return response()->json([]);
         }
 
-        $jurys = Soutenance::with(['projet.etudiant', 'notes', 'membres'])
-            ->whereHas('projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
-            ->doesntHave('resultat')
-            ->get()
-            ->filter(function ($jury) {
-                $presidentId = $jury->membres->firstWhere('fonction', 'president')?->enseignant_id;
-                if (!$presidentId) return false;
+        $compositions = JuryMembrePfe::with(['projet.etudiant', 'soutenance'])
+            ->where('publie', true)
+            ->whereNotNull('president_id')
+            ->whereHas('projet.etudiant', fn($q) =>
+                $q->where('specialite_id', $chef->specialite_id)
+            )
+            ->get();
 
-                return $jury->notes
-                    ->where('enseignant_id', $presidentId)
-                    ->where('finalise', true)
-                    ->isNotEmpty();
-            });
+        $result = [];
 
-        $result = $jurys->map(function ($jury) {
-            $presidentId   = $jury->membres->firstWhere('fonction', 'president')?->enseignant_id;
-            $notePresident = $jury->notes->firstWhere('enseignant_id', $presidentId);
-            return [
-                'jury_id'        => $jury->id,
-                'etudiant_nom'   => trim(($jury->projet?->etudiant?->prenom ?? '') . ' ' . ($jury->projet?->etudiant?->nom ?? '')),
-                'matricule'      => $jury->projet?->etudiant?->matricule ?? '--',
+        foreach ($compositions as $jury) {
+            $soutenance = $jury->soutenance;
+            if (!$soutenance) continue;
+
+            // Must not have a ResultatPfe yet
+            $hasResultat = DB::table('resultats_pfe')
+                ->where('soutenance_id', $soutenance->id)
+                ->exists();
+            if ($hasResultat) continue;
+
+            // Soutenance must be published or finalised
+            if (!in_array($soutenance->statut, ['publie', 'finalise', 'termine'])) continue;
+
+            // President must have a finalised note in notes_pfe
+            $notePresident = DB::table('notes_pfe')
+                ->where('soutenance_id', $soutenance->id)
+                ->where('enseignant_id', $jury->president_id)
+                ->where('finalise', true)
+                ->first();
+
+            if (!$notePresident) continue;
+
+            $etudiant = $jury->projet?->etudiant;
+
+            $result[] = [
+                'jury_id'        => $soutenance->id,
+                'jury_membre_id' => $jury->id,
+                'etudiant_nom'   => trim(($etudiant?->prenom ?? '') . ' ' . ($etudiant?->nom ?? '')),
+                'matricule'      => $etudiant?->matricule ?? '--',
                 'projet_titre'   => $jury->projet?->titre ?? 'Sans titre',
-                'note_president' => $notePresident?->note,
+                'note_president' => (float) $notePresident->note,
             ];
-        })->values();
+        }
 
-        return response()->json($result);
+        return response()->json(array_values($result));
     }
 
     /**
      * POST /api/jurys-pfe/{juryPfe}/deliberer
+     *
      * Computes note finale from the président's finalised note and stores a ResultatPfe.
+     *
+     * Optional body field:
+     *   decision (string) — 'admis' | 'ajourne'
+     *     If provided, overrides the automatic threshold decision (note >= 10 → admis).
+     *     This allows the chef to manually mark a passing student as Ajourné
+     *     (e.g. missing documents, disciplinary reasons) directly from the
+     *     deliberation panel in ConsulterResultatFinal.vue.
+     *     If not provided, the decision is computed automatically from the note.
      */
-    public function deliberer(Soutenance $juryPfe): JsonResponse
+    public function deliberer(Request $request, Soutenance $juryPfe): JsonResponse
     {
-        $juryPfe->load('membres');
+        $juryComposition = JuryMembrePfe::where('projet_id', $juryPfe->projet_id)->first();
+        $presidentId     = $juryComposition?->president_id;
 
-        $presidentId = $juryPfe->membres->firstWhere('fonction', 'president')?->enseignant_id;
         if (!$presidentId) {
             return response()->json(['message' => 'Aucun président désigné pour ce jury.'], 422);
         }
 
         $notePresident = $juryPfe->notes()
             ->where('enseignant_id', $presidentId)
-            ->where('finalise', true)
+            ->finalise()
             ->first();
 
         if (!$notePresident) {
@@ -361,18 +500,25 @@ class EvaluationPfeController extends Controller
 
         $noteFinale = round((float) $notePresident->note, 2);
 
+        // ── Decision resolution ────────────────────────────────────────
+        $decisionInput = $request->input('decision');
+        $decision = in_array($decisionInput, ['admis', 'ajourne'])
+            ? $decisionInput
+            : ($noteFinale >= 10 ? 'admis' : 'ajourne');
+
         $resultat = ResultatPfe::updateOrCreate(
             ['soutenance_id' => $juryPfe->id],
             [
                 'etudiant_id' => $juryPfe->projet->etudiant_id,
                 'note_finale' => $noteFinale,
                 'mention'     => $this->getMention($noteFinale),
-                'decision'    => $noteFinale >= 10 ? 'admis' : 'ajourne',
+                'decision'    => $decision,
                 'publie'      => false,
             ]
         );
 
         $juryPfe->update(['statut' => 'termine']);
+
         return response()->json($resultat);
     }
 
@@ -380,7 +526,7 @@ class EvaluationPfeController extends Controller
 
     /**
      * POST /api/jurys-pfe/{juryPfe}/publier
-     * Publishes a single result and notifies the student + encadrant.
+     * Publishes a single result via the jury route and notifies student + encadrant.
      */
     public function publier(Soutenance $juryPfe): JsonResponse
     {
@@ -412,48 +558,6 @@ class EvaluationPfeController extends Controller
     }
 
     /**
-     * POST /api/resultats-pfe/publier-tous
-     * Publishes ALL unpublished results in the chef's department.
-     */
-    public function publierTous(): JsonResponse
-    {
-        $chef = Auth::user();
-
-        if (!$chef || !$chef->specialite_id) {
-            return response()->json(['message' => '0 résultat(s) publiés.']);
-        }
-
-        $resultats = ResultatPfe::where('publie', false)
-            ->whereHas('soutenance.projet.etudiant', fn($q) => $q->where('specialite_id', $chef->specialite_id))
-            ->with('soutenance.projet.etudiant', 'soutenance.projet.encadrant')
-            ->get();
-
-        foreach ($resultats as $r) {
-            $r->update(['publie' => true, 'publie_le' => now()]);
-
-            $etudiantId  = $r->soutenance?->projet?->etudiant_id;
-            $encadrantId = $r->soutenance?->projet?->encadrant_id;
-            $etudiant    = $r->soutenance?->projet?->etudiant;
-            $nom         = trim(($etudiant?->prenom ?? '') . ' ' . ($etudiant?->nom ?? ''));
-
-            if ($etudiantId) {
-                Notification::create([
-                    'user_id' => $etudiantId,
-                    'message' => 'Vos résultats de soutenance PFE sont disponibles. Connectez-vous pour les consulter.',
-                ]);
-            }
-            if ($encadrantId) {
-                Notification::create([
-                    'user_id' => $encadrantId,
-                    'message' => "Les résultats PFE de votre étudiant {$nom} ont été publiés.",
-                ]);
-            }
-        }
-
-        return response()->json(['message' => "{$resultats->count()} résultat(s) publiés."]);
-    }
-
-    /**
      * GET /api/deliberation-pfe/mon-resultat
      * The authenticated student's published result.
      */
@@ -478,14 +582,27 @@ class EvaluationPfeController extends Controller
 
     // ── Private helpers ───────────────────────────────────────────
 
-    /**
-     * Returns true if the soutenance has fully ended, i.e.
-     * date_soutenance + heure_fin is in the past.
-     *
-     * Handles edge cases:
-     *  • date_soutenance is null → cannot evaluate (returns false).
-     *  • heure_fin is null       → fall back to heure_debut; if also null → false.
-     */
+    private function resolveGrilleVisibilite(?int $specialiteId): string
+    {
+        try {
+            $query = DB::table('grilles_evaluation')
+                ->whereIn('statut', ['verrouille', 'publie']);
+
+            if ($specialiteId) {
+                $scoped = (clone $query)->where('specialite_id', $specialiteId)->get(['statut', 'visibilite']);
+                $grille = $scoped->firstWhere('statut', 'verrouille') ?? $scoped->firstWhere('statut', 'publie');
+                if ($grille) return $grille->visibilite ?? 'encadrant_jury';
+            }
+
+            $all    = $query->get(['statut', 'visibilite']);
+            $grille = $all->firstWhere('statut', 'verrouille') ?? $all->firstWhere('statut', 'publie');
+            return $grille?->visibilite ?? 'encadrant_jury';
+        } catch (\Throwable $e) {
+            Log::warning('resolveGrilleVisibilite error: ' . $e->getMessage());
+            return 'jury_only';
+        }
+    }
+
     private function soutenanceHasEnded(Soutenance $soutenance): bool
     {
         if (empty($soutenance->date_soutenance)) {
@@ -498,7 +615,7 @@ class EvaluationPfeController extends Controller
                 : (string) $soutenance->date_soutenance;
 
             $heureStr = $soutenance->heure_fin
-                ? substr((string) $soutenance->heure_fin, 0, 5)    // "HH:MM"
+                ? substr((string) $soutenance->heure_fin, 0, 5)
                 : ($soutenance->heure_debut
                     ? substr((string) $soutenance->heure_debut, 0, 5)
                     : null);
@@ -515,10 +632,6 @@ class EvaluationPfeController extends Controller
         }
     }
 
-    /**
-     * Loads the per-critère breakdown for a given NotePfe id,
-     * grouped by category.
-     */
     private function loadCategories(int $notePfeId): \Illuminate\Support\Collection
     {
         $rows = DB::table('notes_grille_pfe as ngp')
@@ -551,6 +664,70 @@ class EvaluationPfeController extends Controller
                 ])->values(),
             ];
         })->values();
+    }
+
+    private function notifierEvaluation(Soutenance $juryPfe, bool $isNew): void
+    {
+        try {
+            $juryPfe->loadMissing([
+                'projet.etudiant',
+                'projet.encadrant',
+                'membres.enseignant',
+            ]);
+
+            $projet    = $juryPfe->projet;
+            $etudiant  = $projet?->etudiant;
+            $encadrant = $projet?->encadrant;
+
+            if (!$etudiant) return;
+
+            $etudiantNom  = trim(($etudiant->prenom ?? '') . ' ' . ($etudiant->nom ?? ''));
+            $projetTitre  = $projet->titre ?? 'Projet sans titre';
+            $action       = $isNew ? 'soumis' : 'mis à jour';
+            $actionLabel  = $isNew ? 'soumise' : 'mise à jour';
+
+            if ($encadrant) {
+                Notification::create([
+                    'user_id' => $encadrant->id,
+                    'message' => "La fiche d'évaluation de votre étudiant(e) {$etudiantNom} "
+                               . "(projet : « {$projetTitre} ») a été {$actionLabel} par le président du jury.",
+                ]);
+            }
+
+            $examinateurs = $juryPfe->membres
+                ->where('fonction', 'examinateur')
+                ->filter(fn($m) => $m->enseignant !== null);
+
+            foreach ($examinateurs as $membre) {
+                Notification::create([
+                    'user_id' => $membre->enseignant->id,
+                    'message' => "La fiche d'évaluation du projet « {$projetTitre} » "
+                               . "(étudiant(e) : {$etudiantNom}) a été {$actionLabel} par le président du jury.",
+                ]);
+            }
+
+            if ($etudiant->specialite_id) {
+                $chefs = \App\Models\Utilisateur::where('role', 'chef_departement')
+                    ->where('specialite_id', $etudiant->specialite_id)
+                    ->get();
+
+                $presidentMembre = $juryPfe->membres->firstWhere('fonction', 'president');
+                $presidentEns    = $presidentMembre?->enseignant;
+                $presidentNom    = $presidentEns
+                    ? trim(($presidentEns->prenom ?? '') . ' ' . ($presidentEns->nom ?? ''))
+                    : 'Le président du jury';
+
+                foreach ($chefs as $chef) {
+                    Notification::create([
+                        'user_id' => $chef->id,
+                        'message' => "{$presidentNom} a {$action} la fiche d'évaluation du jury "
+                                   . "pour le projet « {$projetTitre} » (étudiant(e) : {$etudiantNom}).",
+                    ]);
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning('notifierEvaluation: ' . $e->getMessage());
+        }
     }
 
     private function getMention(float $note): string

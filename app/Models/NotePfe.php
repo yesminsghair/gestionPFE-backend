@@ -22,6 +22,23 @@ class NotePfe extends Model
         'finalise' => 'boolean',
     ];
 
+    // ── Scopes ─────────────────────────────────────────────────────
+
+    /**
+     * Scope: only finalised notes (finalise = true).
+     *
+     * Prefer this over raw ->where('finalise', true) throughout the codebase
+     * so the condition lives in one place and can't diverge.
+     *
+     * Usage:
+     *   NotePfe::finalise()->where('soutenance_id', $id)->first()
+     *   $soutenance->notes()->finalise()->where('enseignant_id', $id)->first()
+     */
+    public function scopeFinalise($query)
+    {
+        return $query->where('finalise', true);
+    }
+
     // ── Relations ──────────────────────────────────────────────────
 
     public function soutenance(): BelongsTo
@@ -42,14 +59,9 @@ class NotePfe extends Model
 
     /**
      * Per-critère breakdown rows stored in notes_grille_pfe.
-     * No dedicated Eloquent model exists for that table, so we use a
-     * HasMany through DB::table in the controller; this relation is
-     * provided for convenience / eager-loading contexts if ever needed.
      */
     public function notesGrille(): HasMany
     {
-        // Pivot table: notes_grille_pfe  (note_pfe_id FK → this model)
-        // No Eloquent model → use a plain HasMany on the raw table name.
         return $this->hasMany(NoteGrillePfe::class, 'note_pfe_id');
     }
 }

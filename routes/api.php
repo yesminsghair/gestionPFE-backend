@@ -47,7 +47,6 @@ Broadcast::routes(['middleware' => ['auth:sanctum']]);
 Route::middleware('auth:sanctum')->group(function () {
 
     // ── AUTH ────────────────────────────────────────────────────────
-    Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me',               [AuthController::class, 'me']);
     Route::post('/change-password', [AuthController::class, 'changePassword']);
 
@@ -251,11 +250,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{juryPfe}/publier-jury',  [JuryCompositionController::class, 'publierJury']);
         Route::post('/{juryPfe}/modifier-jury', [JuryCompositionController::class, 'modifierJury']);
 
-        Route::get('/{juryPfe}/notes',      [EvaluationPfeController::class, 'getNotes']);
-        Route::post('/{juryPfe}/notes',     [EvaluationPfeController::class, 'saveNote']);
-        Route::get('/{juryPfe}/ma-note',    [EvaluationPfeController::class, 'maNoteDetail']);
-        Route::post('/{juryPfe}/deliberer', [EvaluationPfeController::class, 'deliberer']);
-        Route::post('/{juryPfe}/publier',   [EvaluationPfeController::class, 'publier']);
+        Route::get('/{juryPfe}/notes',            [EvaluationPfeController::class, 'getNotes']);
+        Route::post('/{juryPfe}/notes',           [EvaluationPfeController::class, 'saveNote']);
+        Route::get('/{juryPfe}/ma-note',          [EvaluationPfeController::class, 'maNoteDetail']);
+        Route::get('/{juryPfe}/evaluation-recue', [EvaluationPfeController::class, 'evaluationRecue']);
+        Route::post('/{juryPfe}/deliberer',       [EvaluationPfeController::class, 'deliberer']);
+        Route::post('/{juryPfe}/publier',         [EvaluationPfeController::class, 'publier']);
     });
 
     // ── SOUTENANCE : PLANIFICATION ───────────────────────────────────
